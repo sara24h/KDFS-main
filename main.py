@@ -24,7 +24,7 @@ from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal, ResNet_
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from train import Train
-from test_330k import Test
+from test import Test
 from finetune import Finetune
 from train_ddp import TrainDDP
 from finetune_ddp import FinetuneDDP
