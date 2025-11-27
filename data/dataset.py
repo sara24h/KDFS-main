@@ -265,8 +265,8 @@ class Dataset_selector(Dataset):
         # Create data loaders with DDP support for all loaders
         if ddp:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)
-            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=True)
-            test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, shuffle=True)
+            val_sampler = torch.utils.data.distributed.DistributedSampler(val_dataset, shuffle=False)
+            test_sampler = torch.utils.data.distributed.DistributedSampler(test_dataset, shuffle=False)
             
             self.loader_train = DataLoader(
                 train_dataset, 
