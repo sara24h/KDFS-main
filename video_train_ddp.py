@@ -29,7 +29,7 @@ Flops_baselines = {
         "330k": 5390.0,
         "190k": 5390.0,
         "uadfv": 172690, # مقدار FLOPs برای ویدیو
-    }}
+    }
 }
 
 class TrainDDP:
