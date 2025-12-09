@@ -1,4 +1,3 @@
-```python
 import json
 import os
 import random
@@ -545,4 +544,3 @@ class TrainDDP:
         self.define_loss()
         self.define_optim()
         self.train()
-```
