@@ -21,6 +21,7 @@ gumbel_end_temperature=${GUMBEL_END_TEMPERATURE:-0.1}
 coef_kdloss=${COEF_KDLOSS:-0.5}
 coef_rcloss=${COEF_RCLOSS:-1.0}
 coef_maskloss=${COEF_MASKLOSS:-1.0}
+compress_rate=${COMPRESS_RATE:-0.3}
 finetune_num_epochs=${FINETUNE_NUM_EPOCHS:-15}
 finetune_lr=${FINETUNE_LR:-4e-06}
 finetune_warmup_steps=${FINETUNE_WARMUP_STEPS:-5}
@@ -99,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --finetune_weight_decay) finetune_weight_decay="$2"; shift 2 ;;
         --finetune_train_batch_size) finetune_train_batch_size="$2"; shift 2 ;;
         --finetune_eval_batch_size) finetune_eval_batch_size="$2"; shift 2 ;;
+        --compress_rate) compress_rate="$2"; shift 2 ;;
         --dataset_mode) dataset_mode="$2"; shift 2 ;;
         --dataset_dir) dataset_dir="$2"; shift 2 ;;
         --master_port) master_port="$2"; shift 2 ;;
@@ -158,6 +160,7 @@ if [ "$PHASE" = "train" ]; then
         --coef_rcloss "$coef_rcloss" \
         --coef_maskloss "$coef_maskloss" \
         --dataset_mode "$dataset_mode" \
+        --compress_rate $compress_rate \
         --dataset_dir "$dataset_dir" \
         $( [ -n "$resume" ] && echo "--resume $resume" ) \
         $ddp_flag
