@@ -16,7 +16,6 @@ from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMasked
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-from get_flops_and_params_video import Flops_baseline
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
