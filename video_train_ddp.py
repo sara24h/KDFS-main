@@ -11,15 +11,20 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
-from data.video_data import create_uadfv_dataloaders
-from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv, SoftMaskedConv2d
+from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv, SoftMaskedConv2d)
+from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
+from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-from torch import amp
+from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
+from model.teacher.GoogleNet import GoogLeNet_deepfake
+from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+# --- اصلاح ۱: مقادیر پایه FLOPs اصلاح و کامل شد ---
+# مقادیر uadfv برای معماری‌های مختلف اضافه شدند و مقادیر منطقی‌تری انتخاب شدند.
 Flops_baselines = {
     "resnet50": {
         "hardfakevsrealfaces": 7700.0,
@@ -28,9 +33,28 @@ Flops_baselines = {
         "200k": 5390.0,
         "330k": 5390.0,
         "190k": 5390.0,
-        "uadfv": 172690, # مقدار FLOPs برای ویدیو
+        "uadfv": 172690,  # مقدار منطقی برای 16 فریم (مثلاً 1600 MFLOPs/frame * 16)
+    },
+    "mobilenetv2": {
+        "hardfakevsrealfaces": 7700.0,
+        "rvf10k": 416.68,
+        "140k": 416.68,
+        "200k": 416.68,
+        "330k": 416.68,
+        "190k": 416.68,
+        "uadfv": 6000.0,   # مقدار تخمینی برای MobileNetV2
+    },
+    "googlenet": {
+        "hardfakevsrealfaces": 7700.0,
+        "rvf10k": 416.68,
+        "140k": 416.68,
+        "200k": 416.68,
+        "330k": 416.68,
+        "190k": 416.68,
+        "uadfv": 7000.0,   # مقدار تخمینی برای GoogleNet
     }
 }
+
 
 class TrainDDP:
     def __init__(self, args):
@@ -48,7 +72,6 @@ class TrainDDP:
         self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
-        # کد صحیح:
         self.warmup_start_lr = args.warmup_start_lr
         self.lr_decay_T_max = args.lr_decay_T_max
         self.lr_decay_eta_min = args.lr_decay_eta_min
@@ -61,7 +84,7 @@ class TrainDDP:
         self.coef_kdloss = args.coef_kdloss
         self.coef_rcloss = args.coef_rcloss
         self.coef_maskloss = args.coef_maskloss
-        self.compress_rate=args.compress_rate
+        self.compress_rate = args.compress_rate
         self.resume = args.resume
         self.start_epoch = 0
         self.best_prec1 = 0
@@ -87,7 +110,6 @@ class TrainDDP:
         self.rank = dist.get_rank()
         self.local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(self.local_rank)
-        print("dist_init method executed.")
 
     def result_init(self):
         if self.rank == 0:
@@ -103,7 +125,6 @@ class TrainDDP:
                 self.args, os.path.join(self.result_dir, "train_config.txt")
             )
             self.logger.info("--------- Train -----------")
-        print("result_init method executed.")
 
     def setup_seed(self):
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -119,15 +140,16 @@ class TrainDDP:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.enabled = True
-        print("setup_seed method executed.")
-
 
     def dataload(self):
         if self.dataset_mode == "uadfv":
+            from data.video_data import create_uadfv_dataloaders
+
             if self.rank == 0:
                 self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
                 self.logger.info(f"Number of frames per video: {self.num_frames}")
                 self.logger.info(f"Frame sampling strategy: {self.frame_sampling}")
+                self.logger.info(f"Split ratio (train/val/test): {self.split_ratio}")
 
             self.train_loader, self.val_loader, self.test_loader = create_uadfv_dataloaders(
                 root_dir=self.dataset_dir,
@@ -143,8 +165,12 @@ class TrainDDP:
             )
 
             if self.rank == 0:
+                self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
+                self.avg_video_duration = 11.6
+                self.avg_video_fps = 30.00
+                self.logger.info(f"Average video duration set to: {self.avg_video_duration}s")
+                self.logger.info(f"Average video FPS set to: {self.avg_video_fps}")
                 self.logger.info("UADFV Dataset has been loaded!")
-        print("dataload method executed.")
 
     def build_model(self):
         if self.rank == 0:
@@ -153,12 +179,16 @@ class TrainDDP:
 
         if self.arch == 'resnet50':
             teacher_model = ResNet_50_hardfakevsreal()
-        
+        elif self.arch == 'mobilenetv2':
+            teacher_model = MobileNetV2_deepfake()
+        elif self.arch == 'googlenet':
+            teacher_model = GoogLeNet_deepfake()
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
 
         ckpt_teacher = torch.load(self.teacher_ckpt_path, map_location="cpu")
-        state_dict = ckpt_teacher.get('config_state_dict', ckpt_teacher.get('student', ckpt_teacher))
+        state_dict = ckpt_teacher.get('config_state_dict',
+                                      ckpt_teacher.get('student', ckpt_teacher))
 
         if list(state_dict.keys())[0].startswith('module.'):
             from collections import OrderedDict
@@ -174,10 +204,12 @@ class TrainDDP:
         if self.rank == 0:
             self.logger.info("Building student model")
 
-        # منطق ساخت مدل دانش‌آموز ساده‌سازی شده
         if self.arch == 'resnet50':
             StudentModelClass = ResNet_50_sparse_uadfv
-        
+        elif self.arch == 'mobilenetv2':
+            StudentModelClass = MobileNetV2_sparse_deepfake
+        elif self.arch == 'googlenet':
+            StudentModelClass = GoogLeNet_sparse_deepfake
         else:
             raise ValueError(f"Unsupported architecture for student: {self.arch}")
 
@@ -186,22 +218,26 @@ class TrainDDP:
             gumbel_end_temperature=self.gumbel_end_temperature,
             num_epochs=self.num_epochs,
         )
-
         self.student.dataset_type = self.args.dataset_type
+
+        if self.arch == 'mobilenetv2':
+            num_ftrs = self.student.classifier.in_features
+            self.student.classifier = nn.Linear(num_ftrs, 1)
+        elif self.arch == 'googlenet':
+            num_ftrs = self.student.fc.in_features
+            self.student.fc = nn.Linear(num_ftrs, 1)
+        else:  # resnet50
+            num_ftrs = self.student.fc.in_features
+            self.student.fc = nn.Linear(num_ftrs, 1)
+
         self.student = self.student.cuda()
-
-        num_ftrs = self.student.fc.in_features
-        self.student.fc = nn.Linear(num_ftrs, 1).cuda()
-
         self.student = DDP(self.student, device_ids=[self.local_rank])
-        print("build_model method executed.")
 
     def define_loss(self):
         self.ori_loss = nn.BCEWithLogitsLoss().cuda()
         self.kd_loss = loss.KDLoss().cuda()
         self.rc_loss = loss.RCLoss().cuda()
         self.mask_loss = loss.MaskLoss().cuda()
-        print("define_loss method executed.")
 
     def define_optim(self):
         weight_params = []
@@ -234,11 +270,11 @@ class TrainDDP:
             warmup_steps=self.warmup_steps,
             warmup_start_lr=self.warmup_start_lr,
         )
-        print("define_optim method executed.")
 
     def resume_student_ckpt(self):
         if not os.path.exists(self.resume):
             raise FileNotFoundError(f"Checkpoint file not found: {self.resume}")
+
         ckpt_student = torch.load(self.resume, map_location="cpu", weights_only=True)
         self.best_prec1 = ckpt_student["best_prec1"]
         self.start_epoch = ckpt_student["start_epoch"]
@@ -248,8 +284,7 @@ class TrainDDP:
         self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
         self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
         if self.rank == 0:
-            self.logger.info("=> Continue from epoch {}...".format(self.start_epoch + 1))
-        print("resume_student_ckpt method executed.")
+            self.logger.info(f"=> Continue from epoch {self.start_epoch + 1}...")
 
     def save_student_ckpt(self, is_best, epoch):
         if self.rank == 0:
@@ -257,25 +292,40 @@ class TrainDDP:
             if not os.path.exists(folder):
                 os.makedirs(folder)
 
-            ckpt_student = {}
-            ckpt_student["best_prec1"] = self.best_prec1
-            ckpt_student["start_epoch"] = epoch
-            ckpt_student["student"] = self.student.module.state_dict()
-            ckpt_student["optim_weight"] = self.optim_weight.state_dict()
-            ckpt_student["optim_mask"] = self.optim_mask.state_dict()
-            ckpt_student["scheduler_student_weight"] = self.scheduler_student_weight.state_dict()
-            ckpt_student["scheduler_student_mask"] = self.scheduler_student_mask.state_dict()
+            ckpt_student = {
+                "best_prec1": self.best_prec1,
+                "start_epoch": epoch,
+                "student": self.student.module.state_dict(),
+                "optim_weight": self.optim_weight.state_dict(),
+                "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
+            }
+
+            if self.optim_mask is not None:
+                ckpt_student["optim_mask"] = self.optim_mask.state_dict()
+            if self.scheduler_student_mask is not None:
+                ckpt_student["scheduler_student_mask"] = self.scheduler_student_mask.state_dict()
 
             if is_best:
-                torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_best.pt"))
-            torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_last.pt"))
-        print("save_student_ckpt method executed.")
+                torch.save(ckpt_student,
+                           os.path.join(folder, self.arch + "_sparse_best.pt"))
+            torch.save(ckpt_student,
+                       os.path.join(folder, self.arch + "_sparse_last.pt"))
 
     def reduce_tensor(self, tensor):
         rt = tensor.clone()
         dist.all_reduce(rt, op=dist.ReduceOp.SUM)
         rt /= self.world_size
         return rt
+
+    def get_mask_averages(self):
+        """Get average mask values for each layer"""
+        mask_avgs = []
+        for m in self.student.module.mask_modules:
+            if isinstance(m, SoftMaskedConv2d):
+                with torch.no_grad():
+                    mask = torch.sigmoid(m.mask_weight)
+                    mask_avgs.append(round(mask.mean().item(), 2))
+        return mask_avgs
 
     def train(self):
         if self.rank == 0:
@@ -287,6 +337,8 @@ class TrainDDP:
 
         if self.resume:
             self.resume_student_ckpt()
+
+        is_video_dataset = self.dataset_mode in ["uadfv"]
 
         if self.rank == 0:
             meter_oriloss = meter.AverageMeter("OriLoss", ":.4e")
@@ -300,6 +352,7 @@ class TrainDDP:
             self.train_loader.sampler.set_epoch(epoch)
             self.student.train()
             self.student.module.ticket = False
+
             if self.rank == 0:
                 meter_oriloss.reset()
                 meter_kdloss.reset()
@@ -307,227 +360,174 @@ class TrainDDP:
                 meter_maskloss.reset()
                 meter_loss.reset()
                 meter_top1.reset()
-                lr = (
-                    self.optim_weight.state_dict()["param_groups"][0]["lr"]
-                    if epoch > 1
-                    else self.warmup_start_lr
-                )
+                current_lr = self.optim_weight.param_groups[0]['lr']
 
             self.student.module.update_gumbel_temperature(epoch)
+            current_gumbel_temp = self.student.module.gumbel_temperature
+
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
-                    _tqdm.set_description("epoch: {}/{}".format(epoch, self.num_epochs))
-                
-                # --- شروع بخش اصلاح‌شده برای داده‌های ویدیویی ---
-                for videos, targets in self.train_loader:
+                    _tqdm.set_description(f"epoch: {epoch}/{self.num_epochs}")
+
+                for batch_data in self.train_loader:
                     self.optim_weight.zero_grad()
-                    self.optim_mask.zero_grad()
-                    videos = videos.cuda(non_blocking=True)
-                    targets = targets.cuda(non_blocking=True).float()
-                    
-                    batch_size, num_frames, C, H, W = videos.shape
-                    # تبدیل ویدیو به توالی فریم
-                    images = videos.view(-1, C, H, W)
-                    # تکرار برچسب برای هر فریم
-                    targets_expanded = targets.unsqueeze(1).repeat(1, num_frames).view(-1)
-                    # --- پایان بخش اصلاح‌شده ---
+                    if self.optim_mask is not None:
+                        self.optim_mask.zero_grad()
 
-                    if torch.isnan(images).any() or torch.isinf(images).any() or torch.isnan(targets_expanded).any() or torch.isinf(targets_expanded).any():
-                        if self.rank == 0:
-                            self.logger.warning("Invalid input detected (NaN or Inf)")
-                        continue
+                    if is_video_dataset:
+                        videos, targets = batch_data
+                        videos = videos.cuda(non_blocking=True)
+                        targets = targets.cuda(non_blocking=True).float()
 
-                    with autocast():
-                        logits_student, feature_list_student = self.student(images)
-                        logits_student = logits_student.squeeze(1)
-                        
-                        with torch.no_grad():
-                            logits_teacher, feature_list_teacher = self.teacher(images)
-                            logits_teacher = logits_teacher.squeeze(1)
+                        batch_size, num_frames, C, H, W = videos.shape
+                        images = videos.view(-1, C, H, W)
 
-                        # --- شروع بخش اصلاح‌شده برای محاسبه زیان در سطح ویدیو ---
-                        logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
-                        logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
-                        
-                        ori_loss = self.ori_loss(logits_student, targets)
-                        kd_loss = (self.target_temperature**2) * self.kd_loss(
-                            logits_teacher, logits_student, self.target_temperature
-                        )
-                        # --- پایان بخش اصلاح‌شده ---
+                        if torch.isnan(images).any() or torch.isinf(images).any() or \
+                           torch.isnan(targets).any() or torch.isinf(targets).any():
+                            if self.rank == 0:
+                                self.logger.warning("Invalid input detected (NaN or Inf)")
+                            continue
 
-                        rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
-                        for i in range(len(feature_list_student)):
-                            rc_loss = rc_loss + self.rc_loss(
-                                feature_list_student[i], feature_list_teacher[i]
+                        with autocast():
+                            logits_student, feature_list_student = self.student(images)
+                            logits_student = logits_student.squeeze(1)
+                            logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
+
+                            with torch.no_grad():
+                                logits_teacher, feature_list_teacher = self.teacher(images)
+                                logits_teacher = logits_teacher.squeeze(1)
+                                logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
+
+                            ori_loss = self.ori_loss(logits_student, targets)
+                            kd_loss = (self.target_temperature ** 2) * self.kd_loss(
+                                logits_teacher, logits_student, self.target_temperature)
+
+                            rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
+                            if len(feature_list_student) > 0:
+                                for i in range(len(feature_list_student)):
+                                    layer_rc_loss = self.rc_loss(
+                                        feature_list_student[i],
+                                        feature_list_teacher[i]
+                                    )
+                                    rc_loss = rc_loss + layer_rc_loss
+                                rc_loss = rc_loss / len(feature_list_student)
+                            
+                            # --- اصلاح ۲: محاسبه صحیح FLOPs برای زیان ماسک ---
+                            Flops_baseline = Flops_baselines[self.arch][self.args.dataset_type]
+                            current_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
+                            mask_loss = self.mask_loss(current_video_flops, Flops_baseline * (10**6), self.compress_rate).cuda()
+
+                            total_loss = (
+                                ori_loss +
+                                self.coef_kdloss * kd_loss +
+                                self.coef_rcloss * rc_loss +
+                                self.coef_maskloss * mask_loss
                             )
 
-                        Flops_baseline = Flops_baselines[self.arch][self.args.dataset_type]
-                        Flops = self.student.module.get_flops()
-                        mask_loss = self.mask_loss(
-                            Flops, Flops_baseline * (10**6), self.compress_rate
-                        ).cuda()
+                        scaler.scale(total_loss).backward()
+                        scaler.step(self.optim_weight)
+                        if self.optim_mask is not None:
+                            scaler.step(self.optim_mask)
+                        scaler.update()
 
-                        total_loss = (
-                            ori_loss
-                            + self.coef_kdloss * kd_loss
-                            + self.coef_rcloss * rc_loss / len(feature_list_student)
-                            + self.coef_maskloss * mask_loss
-                        )
-
-                    scaler.scale(total_loss).backward()
-                    scaler.step(self.optim_weight)
-                    scaler.step(self.optim_mask)
-                    scaler.update()
-
-                    preds = (torch.sigmoid(logits_student) > 0.5).float()
-                    correct = (preds == targets).sum().item()
-                    prec1 = 100. * correct / batch_size # محاسبه دقت بر اساس اندازه دسته ویدیو
+                        preds = (torch.sigmoid(logits_student) > 0.5).float()
+                        correct = (preds == targets).sum().item()
+                        prec1 = 100.0 * correct / batch_size
 
                     dist.barrier()
-                    reduced_ori_loss = self.reduce_tensor(ori_loss)
-                    reduced_kd_loss = self.reduce_tensor(kd_loss)
-                    reduced_rc_loss = self.reduce_tensor(rc_loss)
-                    reduced_mask_loss = self.reduce_tensor(mask_loss)
-                    reduced_total_loss = self.reduce_tensor(total_loss)
-                    reduced_prec1 = self.reduce_tensor(torch.tensor(prec1).cuda())
+                    reduced_ori_loss = self.reduce_tensor(ori_loss.detach())
+                    reduced_kd_loss = self.reduce_tensor(kd_loss.detach())
+                    reduced_rc_loss = self.reduce_tensor(rc_loss.detach())
+                    reduced_mask_loss = self.reduce_tensor(mask_loss.detach())
+                    reduced_total_loss = self.reduce_tensor(total_loss.detach())
+                    reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device='cuda'))
 
                     if self.rank == 0:
-                        n = batch_size
+                        n = batch_size if is_video_dataset else images.size(0)
                         meter_oriloss.update(reduced_ori_loss.item(), n)
                         meter_kdloss.update(self.coef_kdloss * reduced_kd_loss.item(), n)
-                        meter_rcloss.update(
-                            self.coef_rcloss * reduced_rc_loss.item() / len(feature_list_student), n
-                        )
+                        meter_rcloss.update(self.coef_rcloss * reduced_rc_loss.item(), n)
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
                         meter_loss.update(reduced_total_loss.item(), n)
                         meter_top1.update(reduced_prec1.item(), n)
 
                         _tqdm.set_postfix(
-                            loss="{:.4f}".format(meter_loss.avg),
-                            train_acc="{:.4f}".format(meter_top1.avg),
+                            loss=f"{meter_loss.avg:.4f}",
+                            acc=f"{meter_top1.avg:.2f}"
                         )
                         _tqdm.update(1)
 
-                    time.sleep(0.01)
-
-            self.scheduler_student_weight.step()
-            self.scheduler_student_mask.step()
-
+            # --- اصلاح ۳: بخش لاگ‌گیری آموزش (Training Log) ---
             if self.rank == 0:
-                Flops = self.student.module.get_flops()
+                # محاسبه مقادیر مورد نیاز برای لاگ (فقط یک بار)
+                train_avg_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
+                train_mask_avgs = self.get_mask_averages()
+
+                self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
+                                f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
+                                f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.6f} "
+                                f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
+                                f"Train_Acc {meter_top1.avg:.2f}")
+                self.logger.info(f"[Train Avg Video Flops] Epoch {epoch} : {train_avg_video_flops/1e12:.2f} TFLOPs")
+                self.logger.info(f"[Train mask avg] Epoch {epoch} : {train_mask_avgs}")
+
                 self.writer.add_scalar("train/loss/ori_loss", meter_oriloss.avg, global_step=epoch)
                 self.writer.add_scalar("train/loss/kd_loss", meter_kdloss.avg, global_step=epoch)
                 self.writer.add_scalar("train/loss/rc_loss", meter_rcloss.avg, global_step=epoch)
                 self.writer.add_scalar("train/loss/mask_loss", meter_maskloss.avg, global_step=epoch)
                 self.writer.add_scalar("train/loss/total_loss", meter_loss.avg, global_step=epoch)
                 self.writer.add_scalar("train/acc/top1", meter_top1.avg, global_step=epoch)
-                self.writer.add_scalar("train/lr/lr", lr, global_step=epoch)
+                self.writer.add_scalar("train/lr/lr", current_lr, global_step=epoch)
                 self.writer.add_scalar("train/temperature/gumbel_temperature", self.student.module.gumbel_temperature, global_step=epoch)
-                self.writer.add_scalar("train/Flops", Flops, global_step=epoch)
+                self.writer.add_scalar("train/Flops", train_avg_video_flops, global_step=epoch)
 
-                self.logger.info(
-                    "[Train] "
-                    "Epoch {0} : "
-                    "Gumbel_temperature {gumbel_temperature:.2f} "
-                    "LR {lr:.6f} "
-                    "OriLoss {ori_loss:.4f} "
-                    "KDLoss {kd_loss:.4f} "
-                    "RCLoss {rc_loss:.4f} "
-                    "MaskLoss {mask_loss:.6f} "
-                    "TotalLoss {total_loss:.4f} "
-                    "Train_Acc {train_acc:.2f}".format(
-                        epoch,
-                        gumbel_temperature=self.student.module.gumbel_temperature,
-                        lr=lr,
-                        ori_loss=meter_oriloss.avg,
-                        kd_loss=meter_kdloss.avg,
-                        rc_loss=meter_rcloss.avg,
-                        mask_loss=meter_maskloss.avg,
-                        total_loss=meter_loss.avg,
-                        train_acc=meter_top1.avg,
-                    )
-                )
-
-                masks = []
-                for _, m in enumerate(self.student.module.mask_modules):
-                    masks.append(round(m.mask.mean().item(), 2))
-                self.logger.info("[Train mask avg] Epoch {0} : ".format(epoch) + str(masks))
-
-                self.logger.info(
-                    "[Train model Flops] Epoch {0} : ".format(epoch)
-                    + str(Flops.item() / (10**6))
-                    + "M"
-                )
-
-            # Validation
+            # --- اصلاح ۴: بخش لاگ‌گیری اعتبارسنجی (Validation Log) ---
             if self.rank == 0:
                 self.student.eval()
                 self.student.module.ticket = True
-                meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
+                val_meter = meter.AverageMeter("Acc@1", ":6.2f")
+
                 with torch.no_grad():
-                    with tqdm(total=len(self.val_loader), ncols=100) as _tqdm:
-                        _tqdm.set_description("Validation epoch: {}/{}".format(epoch, self.num_epochs))
-                        # --- شروع بخش اصلاح‌شده برای اعتبارسنجی ویدیویی ---
-                        for val_videos, val_targets in self.val_loader:
-                            val_videos = val_videos.cuda(non_blocking=True)
-                            val_targets = val_targets.cuda(non_blocking=True).float()
-                            
-                            val_batch_size, val_num_frames, C, H, W = val_videos.shape
-                            val_images = val_videos.view(-1, C, H, W)
-                            
-                            logits_student, _ = self.student(val_images)
-                            logits_student = logits_student.squeeze(1)
-                            logits_student = logits_student.view(val_batch_size, val_num_frames).mean(dim=1)
-                            # --- پایان بخش اصلاح‌شده ---
-                            
-                            preds = (torch.sigmoid(logits_student) > 0.5).float()
-                            correct = (preds == val_targets).sum().item()
-                            prec1 = 100. * correct / val_batch_size
-                            n = val_batch_size
-                            meter_top1.update(prec1, n)
+                    for val_videos, val_targets in self.val_loader:
+                        val_videos = val_videos.cuda(non_blocking=True)
+                        val_targets = val_targets.cuda(non_blocking=True).float()
 
-                            _tqdm.set_postfix(
-                                val_acc="{:.4f}".format(meter_top1.avg),
-                            )
-                            _tqdm.update(1)
-                            time.sleep(0.01)
+                        val_batch_size, val_num_frames, C, H, W = val_videos.shape
+                        val_frames = val_videos.view(-1, C, H, W)
 
-                Flops = self.student.module.get_flops()
-                self.writer.add_scalar("val/acc/top1", meter_top1.avg, global_step=epoch)
-                self.writer.add_scalar("val/Flops", Flops, global_step=epoch)
+                        val_logits, _ = self.student(val_frames)
+                        val_logits = val_logits.squeeze(1)
+                        val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
 
-                self.logger.info(
-                    "[Val] "
-                    "Epoch {0} : "
-                    "Val_Acc {val_acc:.2f}".format(
-                        epoch,
-                        val_acc=meter_top1.avg,
-                    )
-                )
+                        val_preds = (torch.sigmoid(val_logits) > 0.5).float()
+                        correct = (val_preds == val_targets).sum().item()
+                        acc1 = 100.0 * correct / val_batch_size
+                        val_meter.update(acc1, val_batch_size)
 
-                masks = []
-                for _, m in enumerate(self.student.module.mask_modules):
-                    masks.append(round(m.mask.mean().item(), 2))
-                self.logger.info("[Val mask avg] Epoch {0} : ".format(epoch) + str(masks))
+                # محاسبه مقادیر مورد نیاز برای لاگ (فقط یک بار)
+                val_avg_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
+                val_mask_avgs = self.get_mask_averages()
 
-                self.logger.info(
-                    "[Val model Flops] Epoch {0} : ".format(epoch)
-                    + str(Flops.item() / (10**6))
-                    + "M"
-                )
+                self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
+                self.logger.info(f"[Val Avg Video Flops] Epoch {epoch} : {val_avg_video_flops/1e12:.2f} TFLOPs")
+                self.logger.info(f"[Val mask avg] Epoch {epoch} : {val_mask_avgs}")
 
-                if self.best_prec1 < meter_top1.avg:
-                    self.best_prec1 = meter_top1.avg
-                    self.save_student_ckpt(True, epoch)
+                self.writer.add_scalar("val/acc/top1", val_meter.avg, global_step=epoch)
+                self.writer.add_scalar("val/Flops", val_avg_video_flops, global_step=epoch)
+
+                self.scheduler_student_weight.step()
+                if self.scheduler_student_mask is not None:
+                    self.scheduler_student_mask.step()
+
+                if val_meter.avg > self.best_prec1:
+                    self.best_prec1 = val_meter.avg
+                    self.logger.info(f" => Best top1 accuracy on validation before finetune : {self.best_prec1}")
+                    self.save_student_ckpt(is_best=True, epoch=epoch)
                 else:
-                    self.save_student_ckpt(False, epoch)
-
-                self.logger.info(
-                    " => Best top1 accuracy on validation before finetune : " + str(self.best_prec1)
-                )
+                    self.save_student_ckpt(is_best=False, epoch=epoch)
 
         if self.rank == 0:
-            self.logger.info("Train finished!")
+            self.logger.info("Training finished!")
 
     def main(self):
         self.dist_init()
@@ -538,4 +538,3 @@ class TrainDDP:
         self.define_loss()
         self.define_optim()
         self.train()
-        print("main method finished.")
