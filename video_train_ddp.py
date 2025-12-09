@@ -16,9 +16,31 @@ from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMasked
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
+from get_flops_and_params_video import Flops_baseline
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
+Flops_baselines = {
+    "resnet50": {
+        "hardfakevsrealfaces": 7700.0,
+        "rvf10k": 5390,
+        "140k": 5390.0,
+        "200k": 5390.0,
+        "330k": 5390.0,
+        "190k": 5390.0,
+        "uadfv":172690
+        
+    },
+    "mobilenetv2": {
+        "hardfakevsrealfaces": 7700.0,
+        "rvf10k": 416.68,
+        "140k": 416.68,
+        "200k": 416.68,
+        "330k": 416.68,
+        "190k": 416.68,
+        
+    }
+}
 
 class TrainDDP:
     def __init__(self, args):
@@ -49,6 +71,7 @@ class TrainDDP:
         self.coef_kdloss = args.coef_kdloss
         self.coef_rcloss = args.coef_rcloss
         self.coef_maskloss = args.coef_maskloss
+        self.compress_rate = args.compress_rate
         self.resume = args.resume
         self.start_epoch = 0
         self.best_prec1 = 0
