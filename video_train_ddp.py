@@ -230,17 +230,11 @@ class TrainDDP:
 
             self.student.module.update_gumbel_temperature(epoch)
             if self.rank == 0:
-                try:
-            # بعضی‌ها اسم متغیر دما رو current_temperature یا temperature گذاشتن
-                    current_temp = self.student.module.current_temperature
-                except:
-                    current_temp = self.student.module.temperature  # اگر اسم دیگه‌ای داره
+                
                     
                 self.logger.info(
                 f"[DEBUG] Epoch {epoch:03d} | "
-                f"Gumbel Temp: {current_temp:.5f} | "
                 f"MaskLoss coef: {self.coef_maskloss:.6f} | "
-                f"compress_rate (keep ratio): {self.compress_rate:.3f}"
                 )
 
 
