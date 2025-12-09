@@ -3,6 +3,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from sklearn.model_selection import train_test_split
 from PIL import Image
 import argparse
 import random
@@ -13,10 +14,13 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from torch.cuda.amp import autocast, GradScaler
 import torch.distributed as dist
+
 matplotlib.use('Agg')
-from data.dataset import Dataset_selector
+
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv
+from model.teacher.MobilenetV2 import MobileNetV2_deepfake
+from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv, ResNet_50_sparse_rvf10k
+from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from train import Train
 from test_video import Test
@@ -37,7 +41,13 @@ def parse_args():
         choices=("train", "finetune", "test"),
         help="train, finetune or test",
     )
-
+   
+    parser.add_argument(
+        "--compress_rate",
+        type=float,
+        default=0.3,
+        help="Compress rate of the student model",
+    )
     parser.add_argument(
         "--dataset_mode",
         type=str,
@@ -46,18 +56,12 @@ def parse_args():
         help="Dataset to use",
     )
     parser.add_argument(
-        "--compress_rate",
-        type=float,
-        default=0.3,
-        help="Compress rate of the student model",
-    )
-    parser.add_argument(
         "--dataset_dir",
         type=str,
         default="/kaggle/input/uadfv-dataset/UADFV",
         help="The dataset path",
     )
-    
+   
     parser.add_argument(
         "--num_workers",
         type=int,
@@ -91,7 +95,14 @@ def parse_args():
         type=str,
         default="ResNet_50",
         choices=(
+            "ResNet_18",
             "ResNet_50",
+            "VGG_16_bn",
+            "resnet_56",
+            "resnet_110",
+            "DenseNet_40",
+            "GoogLeNet",
+            "MobileNetV2",
         ),
         help="The architecture to prune",
     )
@@ -311,7 +322,13 @@ def parse_args():
         default=0.0001,
         help=" weight decay for fine-tuning",
     )
-    
+    parser.add_argument(
+        "--new_dataset_dir",
+        type=str,
+        default=None,
+        help="Optional new dataset directory for additional testing",
+    )
+
     return parser.parse_args()
 
 def validate_args(args):
@@ -325,29 +342,11 @@ def validate_args(args):
             raise FileNotFoundError(
                 f"UADFV requires 'real/' and 'fake/' subdirectories inside {args.dataset_dir}"
             )
-    elif args.dataset_mode == "hardfake":
-        # You may define CSV paths if needed, or rely on folder structure
-        if not os.path.exists(args.dataset_dir):
-            raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
-    elif args.dataset_mode in ["rvf10k", "140k", "200k", "190k", "330k"]:
-        if not os.path.exists(args.dataset_dir):
-            raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
-    
-    # Common validations
-    if args.phase in ["train", "finetune"]:
-        if not os.path.exists(args.teacher_ckpt_path):
-            raise FileNotFoundError(f"Teacher checkpoint not found: {args.teacher_ckpt_path}")
-
-    if args.phase == "finetune" and args.finetune_student_ckpt_path:
-        if not os.path.exists(args.finetune_student_ckpt_path):
-            raise FileNotFoundError(f"Finetune student checkpoint not found: {args.finetune_student_ckpt_path}")
-
-    if args.phase == "test" and args.sparsed_student_ckpt_path:
-        if not os.path.exists(args.sparsed_student_ckpt_path):
-            raise FileNotFoundError(f"Sparsed student checkpoint not found: {args.sparsed_student_ckpt_path}")
-
+            
 def main():
     args = parse_args()
+    
+    # Validate file and directory existence
     validate_args(args)
 
     # Set seeds for reproducibility
@@ -368,6 +367,9 @@ def main():
 
     if args.dali:
         print("Using NVIDIA DALI for data loading.")
+        from nvidia.dali.pipeline import Pipeline
+        from nvidia.dali.plugin.pytorch import DALIClassificationIterator
+        # DALI pipeline implementation would go here
     else:
         print("Using standard PyTorch DataLoader.")
 
