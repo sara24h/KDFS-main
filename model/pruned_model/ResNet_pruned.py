@@ -247,3 +247,11 @@ def ResNet_50_pruned_hardfakevsreal(masks):
     return ResNet_pruned(
         block=Bottleneck_pruned, num_blocks=[3, 4, 6, 3], masks=masks, num_classes=1
     )
+
+def ResNet_50_pruned_uadfv(masks):
+    return ResNet_pruned(
+        block=Bottleneck_pruned,
+        num_blocks=[3, 4, 6, 3],
+        masks=masks,
+        num_classes=1  
+    )
