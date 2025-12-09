@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 from data.dataset import Dataset_selector
-from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv, SoftMaskedConv2d
+from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from thop import profile
@@ -89,10 +89,12 @@ class TrainDDP:
         else:
             raise ValueError("dataset_mode must be 'uadfv' for this script")
 
-        self.arch = args.arch.lower().replace('_', '')
 
-        if self.arch not in ['resnet50', 'mobilenetv2']:
-            raise ValueError(f"Unsupported architecture: '{args.arch}'. It must be 'resnet50' or 'MobileNetV2'.")
+        self.arch = args.arch.lower().replace('_', '')
+        if self.arch not in ['resnet50', 'mobilenetv2', 'googlenet']:
+            raise ValueError(f"Unsupported architecture: '{args.arch}'. "
+                             "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
+
 
     def dist_init(self):
         dist.init_process_group("nccl")
@@ -131,7 +133,7 @@ class TrainDDP:
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.enabled = True
 
-    def dataload(self):
+   def dataload(self):
         if self.dataset_mode == "uadfv":
             from data.video_data import create_uadfv_dataloaders
 
@@ -154,7 +156,7 @@ class TrainDDP:
                 sampling_strategy=self.frame_sampling
             )
 
-
+            # --- شروع بخش جدید: مشخصات میانگین ویدیو ---
             if self.rank == 0:
                 self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
                 # مقادیر میانگین برای دیتاست UADFV که از قبل محاسبه کرده‌اید
@@ -173,9 +175,7 @@ class TrainDDP:
             self.logger.info("Loading teacher model")
 
         if self.arch == 'resnet50':
-            StudentModelClass = (ResNet_50_sparse_uadfv
-                                 if self.dataset_mode != "hardfake"
-                                 else ResNet_50_sparse_hardfakevsreal)
+            teacher_model = ResNet_50_hardfakevsreal()
         elif self.arch == 'mobilenetv2':
             teacher_model = MobileNetV2_deepfake()
         else:
@@ -213,8 +213,10 @@ class TrainDDP:
         if self.rank == 0:
             self.logger.info("Building student model")
 
-        if self.arch.lower() == 'resnet50':
-            StudentModelClass = ResNet_50_sparse_rvf10k if self.dataset_mode != "hardfake" else ResNet_50_sparse_hardfakevsreal
+        if self.arch == 'resnet50':
+            StudentModelClass = (ResNet_50_sparse_uadfv
+                                 if self.dataset_mode != "hardfake"
+                                 else ResNet_50_sparse_hardfakevsreal)
         elif self.arch.lower() == 'mobilenetv2':
             StudentModelClass = MobileNetV2_sparse_deepfake
         else:
