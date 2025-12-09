@@ -2,7 +2,7 @@
 
 arch=${ARCH:-ResNet_50}
 result_dir=${RESULT_DIR:-/kaggle/working/results/run_resnet50_imagenet_prune1}
-teacher_ckpt_path=${TEACHER_CKPT_PATH:-/kaggle/working/KDFS-Pearson-Corr/teacher_dir/teacher_model_best.pth}
+teacher_ckpt_path=${TEACHER_CKPT_PATH:-/kaggle/working/KDFS-main/teacher_dir/teacher_model_best.pth}
 device=${DEVICE:-0,1}
 num_workers=${NUM_WORKERS:-4}
 pin_memory=${PIN_MEMORY:-true}
@@ -133,7 +133,7 @@ echo "Running torchrun with arguments:"
 
 if [ "$PHASE" = "train" ]; then
     echo "Starting training phase..."
-    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/video_main.py \
+    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-main/video_main.py \
         --phase train \
         --arch "$arch" \
         --device cuda \
@@ -169,7 +169,7 @@ elif [ "$PHASE" = "finetune" ]; then
         exit 1
     fi
 
-    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-Pearson-Corr/video_main.py \
+    torchrun --nproc_per_node=$nproc_per_node --master_port=$master_port /kaggle/working/KDFS-main/video_main.py \
         --phase finetune \
         --arch "$arch" \
         --device cuda \
