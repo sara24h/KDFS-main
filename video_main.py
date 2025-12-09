@@ -41,19 +41,20 @@ def parse_args():
         choices=("train", "finetune", "test"),
         help="train, finetune or test",
     )
-   
-    parser.add_argument(
-        "--compress_rate",
-        type=float,
-        default=0.3,
-        help="Compress rate of the student model",
-    )
+    # فقط یک تعریف برای dataset_mode با تمام گزینه‌ها
     parser.add_argument(
         "--dataset_mode",
         type=str,
         default="uadfv",
         choices=("uadfv", "hardfake", "rvf10k", "140k", "200k", "190k", "330k"),
         help="Dataset to use",
+    )
+    # تعریف compress_rate قبل از dataset_dir
+    parser.add_argument(
+        "--compress_rate",
+        type=float,
+        default=0.3,
+        help="Compress rate of the student model",
     )
     parser.add_argument(
         "--dataset_dir",
@@ -333,16 +334,26 @@ def parse_args():
 
 def validate_args(args):
     """Check if required files and directories exist"""
+    if not os.path.exists(args.dataset_dir):
+        raise FileNotFoundError(f"Dataset directory not found: {args.dataset_dir}")
+    
     if args.dataset_mode == "uadfv":
-        if not os.path.exists(args.dataset_dir):
-            raise FileNotFoundError(f"UADFV dataset directory not found: {args.dataset_dir}")
         real_dir = os.path.join(args.dataset_dir, "real")
         fake_dir = os.path.join(args.dataset_dir, "fake")
         if not os.path.exists(real_dir) or not os.path.exists(fake_dir):
             raise FileNotFoundError(
                 f"UADFV requires 'real/' and 'fake/' subdirectories inside {args.dataset_dir}"
             )
-            
+    elif args.dataset_mode in ["hardfake", "rvf10k", "140k", "200k", "190k", "330k"]:
+        # بررسی وجود فایل‌های CSV برای دیتاست‌های دیگر
+        csv_file = os.path.join(args.dataset_dir, 'data.csv' if args.dataset_mode == "hardfake" else 'train.csv')
+        if not os.path.exists(csv_file):
+            raise FileNotFoundError(f"CSV file not found for {args.dataset_mode}: {csv_file}")
+    
+    # بررسی وجود مدل معلم
+    if not os.path.exists(args.teacher_ckpt_path):
+        raise FileNotFoundError(f"Teacher model checkpoint not found: {args.teacher_ckpt_path}")
+
 def main():
     args = parse_args()
     
@@ -364,6 +375,7 @@ def main():
     print(f"Dataset mode: {args.dataset_mode}")
     print(f"Device: {args.device}")
     print(f"Architecture: {args.arch}")
+    print(f"Compress rate: {args.compress_rate}")  # اضافه شده برای بررسی
 
     if args.dali:
         print("Using NVIDIA DALI for data loading.")
