@@ -82,32 +82,12 @@ class TrainDDP:
         self.local_rank = -1
         self.rank = -1
 
-        if self.dataset_mode == "hardfake":
-            self.args.dataset_type = "hardfakevsrealfaces"
-            self.num_classes = 1
-            self.image_size = 300
-        elif self.dataset_mode == "rvf10k":
-            self.args.dataset_type = "rvf10k"
-            self.num_classes = 1
-            self.image_size = 256
-        elif self.dataset_mode == "140k":
-            self.args.dataset_type = "140k"
-            self.num_classes = 1
-            self.image_size = 256
-        elif self.dataset_mode == "200k":
-            self.args.dataset_type = "200k"
-            self.num_classes = 1
-            self.image_size = 256
-        elif self.dataset_mode == "190k":
-            self.args.dataset_type = "190k"
-            self.num_classes = 1
-            self.image_size = 256
-        elif self.dataset_mode == "330k":
-            self.args.dataset_type = "330k"
+        if self.dataset_mode == "uadfv":
+            self.args.dataset_type = "uadfv"
             self.num_classes = 1
             self.image_size = 256
         else:
-            raise ValueError("dataset_mode must be 'hardfake', 'rvf10k', '140k', '200k', '190k', or '330k'")
+            raise ValueError("dataset_mode must be 'uadfv' for this script")
 
         self.arch = args.arch.lower().replace('_', '')
 
@@ -152,104 +132,40 @@ class TrainDDP:
             torch.backends.cudnn.enabled = True
 
     def dataload(self):
-        if self.dataset_mode not in ['hardfake', 'rvf10k', '140k', '200k', '190k', '330k']:
-            raise ValueError("dataset_mode must be 'hardfake', 'rvf10k', '140k', '200k', '190k', or '330k'")
+        if self.dataset_mode == "uadfv":
+            from data.video_data import create_uadfv_dataloaders
 
-        hardfake_csv_file = None
-        hardfake_root_dir = None
-        rvf10k_train_csv = None
-        rvf10k_valid_csv = None
-        rvf10k_root_dir = None
-        realfake140k_train_csv = None
-        realfake140k_valid_csv = None
-        realfake140k_test_csv = None
-        realfake140k_root_dir = None
-        realfake200k_train_csv = None
-        realfake200k_val_csv = None
-        realfake200k_test_csv = None
-        realfake200k_root_dir = None
-        realfake190k_root_dir = None
-        realfake330k_root_dir = None
-
-        if self.dataset_mode == 'hardfake':
-            hardfake_csv_file = os.path.join(self.dataset_dir, 'data.csv')
-            hardfake_root_dir = self.dataset_dir
-            if self.rank == 0 and not os.path.exists(hardfake_csv_file):
-                raise FileNotFoundError(f"CSV file not found: {hardfake_csv_file}")
-        elif self.dataset_mode == 'rvf10k':
-            rvf10k_train_csv = os.path.join(self.dataset_dir, 'train.csv')
-            rvf10k_valid_csv = os.path.join(self.dataset_dir, 'valid.csv')
-            rvf10k_root_dir = self.dataset_dir
             if self.rank == 0:
-                if not os.path.exists(rvf10k_train_csv):
-                    raise FileNotFoundError(f"Train CSV file not found: {rvf10k_train_csv}")
-                if not os.path.exists(rvf10k_valid_csv):
-                    raise FileNotFoundError(f"Valid CSV file not found: {rvf10k_valid_csv}")
-        elif self.dataset_mode == '140k':
-            realfake140k_train_csv = os.path.join(self.dataset_dir, 'train.csv')
-            realfake140k_valid_csv = os.path.join(self.dataset_dir, 'valid.csv')
-            realfake140k_test_csv = os.path.join(self.dataset_dir, 'test.csv')
-            realfake140k_root_dir = self.dataset_dir
+                self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
+                self.logger.info(f"Number of frames per video: {self.num_frames}")
+                self.logger.info(f"Frame sampling strategy: {self.frame_sampling}")
+                self.logger.info(f"Split ratio (train/val/test): {self.split_ratio}")
+
+            self.train_loader, self.val_loader, self.test_loader = create_uadfv_dataloaders(
+                root_dir=self.dataset_dir,
+                num_frames=self.num_frames,
+                image_size=self.image_size,
+                train_batch_size=self.train_batch_size,
+                eval_batch_size=self.eval_batch_size,
+                num_workers=self.num_workers,
+                pin_memory=self.pin_memory,
+                ddp=True,
+                seed=self.seed,
+                sampling_strategy=self.frame_sampling
+            )
+
+
             if self.rank == 0:
-                if not os.path.exists(realfake140k_train_csv):
-                    raise FileNotFoundError(f"Train CSV file not found: {realfake140k_train_csv}")
-                if not os.path.exists(realfake140k_valid_csv):
-                    raise FileNotFoundError(f"Valid CSV file not found: {realfake140k_valid_csv}")
-                if not os.path.exists(realfake140k_test_csv):
-                    raise FileNotFoundError(f"Test CSV file not found: {realfake140k_test_csv}")
-        elif self.dataset_mode == '200k':
-            realfake200k_train_csv = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/train_labels.csv"
-            realfake200k_val_csv = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/val_labels.csv"
-            realfake200k_test_csv = "/kaggle/input/200k-real-vs-ai-visuals-by-mbilal/test_labels.csv"
-            realfake200k_root_dir = self.dataset_dir
+                self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
+                # مقادیر میانگین برای دیتاست UADFV که از قبل محاسبه کرده‌اید
+                self.avg_video_duration = 11.6  # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
+                self.avg_video_fps = 30.00      # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
+                self.logger.info(f"Average video duration set to: {self.avg_video_duration}s")
+                self.logger.info(f"Average video FPS set to: {self.avg_video_fps}")
+            # --- پایان بخش جدید ---
+
             if self.rank == 0:
-                if not os.path.exists(realfake200k_train_csv):
-                    raise FileNotFoundError(f"Train CSV file not found: {realfake200k_train_csv}")
-                if not os.path.exists(realfake200k_val_csv):
-                    raise FileNotFoundError(f"Valid CSV file not found: {realfake200k_val_csv}")
-                if not os.path.exists(realfake200k_test_csv):
-                    raise FileNotFoundError(f"Test CSV file not found: {realfake200k_test_csv}")
-        elif self.dataset_mode == '190k':
-            realfake190k_root_dir = self.dataset_dir
-            if self.rank == 0 and not os.path.exists(realfake190k_root_dir):
-                raise FileNotFoundError(f"190k dataset directory not found: {realfake190k_root_dir}")
-        elif self.dataset_mode == '330k':
-            realfake330k_root_dir = self.dataset_dir
-            if self.rank == 0 and not os.path.exists(realfake330k_root_dir):
-                raise FileNotFoundError(f"330k dataset directory not found: {realfake330k_root_dir}")
-
-        if self.rank == 0:
-            self.logger.info(f"Loading dataset: {self.dataset_mode}")
-
-        dataset_instance = Dataset_selector(
-            dataset_mode=self.dataset_mode,
-            hardfake_csv_file=hardfake_csv_file,
-            hardfake_root_dir=hardfake_root_dir,
-            rvf10k_train_csv=rvf10k_train_csv,
-            rvf10k_valid_csv=rvf10k_valid_csv,
-            rvf10k_root_dir=rvf10k_root_dir,
-            realfake140k_train_csv=realfake140k_train_csv,
-            realfake140k_valid_csv=realfake140k_valid_csv,
-            realfake140k_test_csv=realfake140k_test_csv,
-            realfake140k_root_dir=realfake140k_root_dir,
-            realfake200k_train_csv=realfake200k_train_csv,
-            realfake200k_val_csv=realfake200k_val_csv,
-            realfake200k_test_csv=realfake200k_test_csv,
-            realfake200k_root_dir=realfake200k_root_dir,
-            realfake190k_root_dir=realfake190k_root_dir,
-            realfake330k_root_dir=realfake330k_root_dir,
-            train_batch_size=self.train_batch_size,
-            eval_batch_size=self.eval_batch_size,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            ddp=True
-        )
-
-        self.train_loader = dataset_instance.loader_train
-        self.val_loader = dataset_instance.loader_val
-        self.test_loader = dataset_instance.loader_test
-        if self.rank == 0:
-            self.logger.info("Dataset has been loaded!")
+                self.logger.info("UADFV Dataset has been loaded!")
 
     def build_model(self):
         if self.rank == 0:
@@ -257,7 +173,9 @@ class TrainDDP:
             self.logger.info("Loading teacher model")
 
         if self.arch == 'resnet50':
-            teacher_model = ResNet_50_hardfakevsreal()
+            StudentModelClass = (ResNet_50_sparse_uadfv
+                                 if self.dataset_mode != "hardfake"
+                                 else ResNet_50_sparse_hardfakevsreal)
         elif self.arch == 'mobilenetv2':
             teacher_model = MobileNetV2_deepfake()
         else:
