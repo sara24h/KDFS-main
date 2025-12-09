@@ -12,13 +12,11 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv, SoftMaskedConv2d)
-from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
-from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
+
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
-from model.teacher.GoogleNet import GoogLeNet_deepfake
+
 from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -179,10 +177,7 @@ class TrainDDP:
 
         if self.arch == 'resnet50':
             teacher_model = ResNet_50_hardfakevsreal()
-        elif self.arch == 'mobilenetv2':
-            teacher_model = MobileNetV2_deepfake()
-        elif self.arch == 'googlenet':
-            teacher_model = GoogLeNet_deepfake()
+      
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
 
@@ -206,10 +201,7 @@ class TrainDDP:
 
         if self.arch == 'resnet50':
             StudentModelClass = ResNet_50_sparse_uadfv
-        elif self.arch == 'mobilenetv2':
-            StudentModelClass = MobileNetV2_sparse_deepfake
-        elif self.arch == 'googlenet':
-            StudentModelClass = GoogLeNet_sparse_deepfake
+      
         else:
             raise ValueError(f"Unsupported architecture for student: {self.arch}")
 
@@ -220,15 +212,9 @@ class TrainDDP:
         )
         self.student.dataset_type = self.args.dataset_type
 
-        if self.arch == 'mobilenetv2':
-            num_ftrs = self.student.classifier.in_features
-            self.student.classifier = nn.Linear(num_ftrs, 1)
-        elif self.arch == 'googlenet':
-            num_ftrs = self.student.fc.in_features
-            self.student.fc = nn.Linear(num_ftrs, 1)
-        else:  # resnet50
-            num_ftrs = self.student.fc.in_features
-            self.student.fc = nn.Linear(num_ftrs, 1)
+        
+        num_ftrs = self.student.fc.in_features
+        self.student.fc = nn.Linear(num_ftrs, 1)
 
         self.student = self.student.cuda()
         self.student = DDP(self.student, device_ids=[self.local_rank])
