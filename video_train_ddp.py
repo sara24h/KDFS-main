@@ -56,7 +56,7 @@ class TrainDDP:
         self.eval_batch_size = args.eval_batch_size
         self.target_temperature = args.target_temperature
         self.gumbel_start_temperature = args.gumbel_start_temperature
-        self.gumbel_end_temperature = self.gumbel_end_temperature
+        self.gumbel_end_temperature = args.gumbel_end_temperature
         self.coef_kdloss = args.coef_kdloss
         self.coef_rcloss = args.coef_rcloss
         self.coef_maskloss = args.coef_maskloss
