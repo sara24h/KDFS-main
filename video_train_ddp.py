@@ -13,13 +13,9 @@ from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 #from data.video_data import Dataset_selector
 from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
-from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
-from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-from model.teacher.Mobilenetv2 import MobileNetV2_deepfake
-from model.teacher.GoogleNet import GoogLeNet_deepfake
 from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -69,9 +65,9 @@ class TrainDDP:
             raise ValueError("dataset_mode must be 'uadfv' for this script")
 
         self.arch = args.arch.lower().replace('_', '')
-        if self.arch not in ['resnet50', 'mobilenetv2', 'googlenet']:
+        if self.arch not in ['resnet50']:
             raise ValueError(f"Unsupported architecture: '{args.arch}'. "
-                             "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
+                             "It must be 'resnet50'")
 
     def dist_init(self):
         dist.init_process_group("nccl")
@@ -153,10 +149,7 @@ class TrainDDP:
 
         if self.arch == 'resnet50':
             teacher_model = ResNet_50_hardfakevsreal()
-        elif self.arch == 'mobilenetv2':
-            teacher_model = MobileNetV2_deepfake()
-        elif self.arch == 'googlenet':
-            teacher_model = GoogLeNet_deepfake()
+
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
 
@@ -182,10 +175,7 @@ class TrainDDP:
             StudentModelClass = (ResNet_50_sparse_uadfv
                                  if self.dataset_mode != "hardfake"
                                  else ResNet_50_sparse_hardfakevsreal)
-        elif self.arch == 'mobilenetv2':
-            StudentModelClass = MobileNetV2_sparse_deepfake
-        elif self.arch == 'googlenet':
-            StudentModelClass = GoogLeNet_sparse_deepfake
+
         else:
             raise ValueError(f"Unsupported architecture for student: {self.arch}")
 
@@ -196,15 +186,9 @@ class TrainDDP:
         )
         self.student.dataset_type = self.args.dataset_type
 
-        if self.arch == 'mobilenetv2':
-            num_ftrs = self.student.classifier.in_features
-            self.student.classifier = nn.Linear(num_ftrs, 1)
-        elif self.arch == 'googlenet':
-            num_ftrs = self.student.fc.in_features
-            self.student.fc = nn.Linear(num_ftrs, 1)
-        else:  # resnet50
-            num_ftrs = self.student.fc.in_features
-            self.student.fc = nn.Linear(num_ftrs, 1)
+ 
+        num_ftrs = self.student.fc.in_features
+        self.student.fc = nn.Linear(num_ftrs, 1)
 
         self.student = self.student.cuda()
         self.student = DDP(self.student, device_ids=[self.local_rank])
@@ -546,14 +530,12 @@ class TrainDDP:
                         val_meter.update(acc1, val_batch_size)
 
                 mask_avgs = self.get_mask_averages()
-                
-                # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
+
                 val_avg_video_flops = self.student.module.get_video_flops(
                     video_duration_seconds=self.avg_video_duration, 
                     fps=self.avg_video_fps
                 )
-                # --- پایان بخش اصلاح‌شده ---
-                
+  
                 self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
                 self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
                 self.logger.info(f"[Val Avg Video Flops] Epoch {epoch} : {val_avg_video_flops/1e12:.2f} TFLOPs")
