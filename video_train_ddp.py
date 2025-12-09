@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
 #from data.video_data import Dataset_selector
-from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
+from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv, SoftMaskedConv2d)
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
@@ -27,8 +27,7 @@ Flops_baselines = {
         "200k": 5390.0,
         "330k": 5390.0,
         "190k": 5390.0,
-        "uadfv":172690
-        
+        "uadfv": 172690
     },
     "mobilenetv2": {
         "hardfakevsrealfaces": 7700.0,
@@ -37,7 +36,6 @@ Flops_baselines = {
         "200k": 416.68,
         "330k": 416.68,
         "190k": 416.68,
-        
     }
 }
 
@@ -57,7 +55,6 @@ class TrainDDP:
         self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
-        # کد صحیح:
         self.warmup_start_lr = args.warmup_start_lr
         self.lr_decay_T_max = args.lr_decay_T_max
         self.lr_decay_eta_min = args.lr_decay_eta_min
@@ -87,8 +84,10 @@ class TrainDDP:
 
         self.arch = args.arch.lower().replace('_', '')
         if self.arch not in ['resnet50']:
-            raise ValueError(f"Unsupported architecture: '{args.arch}'. "
-                             "It must be 'resnet50'")
+            raise ValueError(f"Unsupported architecture: '{args.arch}'. It must be 'resnet50'")
+
+        # ✅ اضافه شده: تنظیم flops_baseline
+        self.flops_baseline = Flops_baselines[self.arch][self.dataset_mode]
 
     def dist_init(self):
         dist.init_process_group("nccl")
@@ -150,15 +149,12 @@ class TrainDDP:
                 sampling_strategy=self.frame_sampling
             )
 
-            # --- شروع بخش جدید: مشخصات میانگین ویدیو ---
             if self.rank == 0:
                 self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
-                # مقادیر میانگین برای دیتاست UADFV که از قبل محاسبه کرده‌اید
-                self.avg_video_duration = 11.6  # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
-                self.avg_video_fps = 30.00      # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
+                self.avg_video_duration = 11.6
+                self.avg_video_fps = 30.00
                 self.logger.info(f"Average video duration set to: {self.avg_video_duration}s")
                 self.logger.info(f"Average video FPS set to: {self.avg_video_fps}")
-            # --- پایان بخش جدید ---
 
             if self.rank == 0:
                 self.logger.info("UADFV Dataset has been loaded!")
@@ -170,7 +166,6 @@ class TrainDDP:
 
         if self.arch == 'resnet50':
             teacher_model = ResNet_50_hardfakevsreal()
-
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
 
@@ -193,10 +188,7 @@ class TrainDDP:
             self.logger.info("Building student model")
 
         if self.arch == 'resnet50':
-            StudentModelClass = (ResNet_50_sparse_uadfv
-                                 if self.dataset_mode != "hardfake"
-                                 else ResNet_50_sparse_hardfakevsreal)
-
+            StudentModelClass = ResNet_50_sparse_uadfv
         else:
             raise ValueError(f"Unsupported architecture for student: {self.arch}")
 
@@ -207,14 +199,12 @@ class TrainDDP:
         )
         self.student.dataset_type = self.args.dataset_type
 
- 
         num_ftrs = self.student.fc.in_features
         self.student.fc = nn.Linear(num_ftrs, 1)
 
         self.student = self.student.cuda()
         self.student = DDP(self.student, device_ids=[self.local_rank])
 
-        # --- DEBUGGING LOG: List all model parameters ---
         if self.rank == 0:
             self.logger.info("--- Student Model Parameters ---")
             for name, param in self.student.module.named_parameters():
@@ -225,16 +215,15 @@ class TrainDDP:
         self.ori_loss = nn.BCEWithLogitsLoss().cuda()
         self.kd_loss = loss.KDLoss().cuda()
         self.rc_loss = loss.RCLoss().cuda()
-        self.mask_loss = loss.MaskLoss().cuda()
+        self.mask_loss = loss.MaskLoss().cuda()  # ✅ بدون آرگومان — forward آرگومان می‌گیرد
 
     def define_optim(self):
         weight_params = []
         mask_params = []
 
-        # --- DEBUGGING LOG: Show which params go to which optimizer ---
         if self.rank == 0:
             self.logger.info("--- Separating Parameters for Optimizers ---")
-        
+
         for name, param in self.student.module.named_parameters():
             if param.requires_grad:
                 if "mask" in name.lower():
@@ -266,7 +255,7 @@ class TrainDDP:
                 warmup_steps=self.warmup_steps,
                 warmup_start_lr=self.warmup_start_lr)
         elif self.rank == 0:
-            self.logger.warning("Warning: No mask parameters found. 'optim_mask' and 'scheduler_student_mask' will be None.")
+            self.logger.warning("Warning: No mask parameters found.")
 
         self.scheduler_student_weight = scheduler.CosineAnnealingLRWarmup(
             self.optim_weight, T_max=self.lr_decay_T_max,
@@ -283,20 +272,20 @@ class TrainDDP:
         self.start_epoch = ckpt_student["start_epoch"]
         self.student.module.load_state_dict(ckpt_student["student"])
         self.optim_weight.load_state_dict(ckpt_student["optim_weight"])
-        
+
         if self.optim_mask is not None and "optim_mask" in ckpt_student:
             self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
         elif self.optim_mask is None and "optim_mask" in ckpt_student:
             if self.rank == 0:
-                self.logger.warning("Checkpoint contains 'optim_mask' but current model has no mask parameters. Skipping load.")
-        
+                self.logger.warning("Skipping 'optim_mask' in checkpoint.")
+
         self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
 
         if self.scheduler_student_mask is not None and "scheduler_student_mask" in ckpt_student:
             self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
         elif self.scheduler_student_mask is None and "scheduler_student_mask" in ckpt_student:
             if self.rank == 0:
-                self.logger.warning("Checkpoint contains 'scheduler_student_mask' but current model has no mask scheduler. Skipping load.")
+                self.logger.warning("Skipping 'scheduler_student_mask' in checkpoint.")
 
         if self.rank == 0:
             self.logger.info(f"=> Continue from epoch {self.start_epoch + 1}...")
@@ -333,7 +322,6 @@ class TrainDDP:
         return rt
 
     def get_mask_averages(self):
-        """Get average mask values for each layer"""
         mask_avgs = []
         for m in self.student.module.mask_modules:
             if isinstance(m, SoftMaskedConv2d):
@@ -379,7 +367,6 @@ class TrainDDP:
                 meter_top1.reset()
                 meter_avg_corr.reset()
                 meter_retention.reset()
-
                 current_lr = self.optim_weight.param_groups[0]['lr']
 
             self.student.module.update_gumbel_temperature(epoch)
@@ -433,24 +420,21 @@ class TrainDDP:
 
                             rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                             
-                            if len(feature_list_student) == 0:
-                                if self.rank == 0:
-                                    self.logger.warning("Feature list is empty! Model may not be returning features.")
-                            else:
+                            if len(feature_list_student) > 0:
                                 for i in range(len(feature_list_student)):
                                     layer_rc_loss = self.rc_loss(
                                         feature_list_student[i], 
                                         feature_list_teacher[i]
                                     )
                                     rc_loss = rc_loss + layer_rc_loss
-                                
                                 rc_loss = rc_loss / len(feature_list_student)
-                                
+
                                 if self.rank == 0 and epoch == 1 and not hasattr(self, '_rc_logged'):
                                     self._rc_logged = True
                                     self.logger.info(f"RC Loss per layer: {rc_loss.item():.6f}")
 
-                            mask_loss = self.mask_loss(self.student.module)
+                            # ✅ اصلاح شده: ارسال دو آرگومان لازم به mask_loss
+                            mask_loss = self.mask_loss(self.student.module, self.flops_baseline, self.compress_rate)
 
                             total_loss = (
                                 ori_loss +
@@ -511,21 +495,15 @@ class TrainDDP:
 
                 if self.rank == 0:
                     self.student.module.ticket = False
-                    
-                    # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
                     avg_video_flops = self.student.module.get_video_flops(
                         video_duration_seconds=self.avg_video_duration, 
                         fps=self.avg_video_fps
                     )
-                    # --- پایان بخش اصلاح‌شده ---
-
                     self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
                                     f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
                                     f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.6f} "
                                     f"MaskLoss {meter_maskloss.avg:.6f} TotalLoss {meter_loss.avg:.4f} "
                                     f"Train_Acc {meter_top1.avg:.2f}")
-                    
-                    # لاگ FLOPs بر حسب TFLOPs برای خوانایی بهتر
                     self.logger.info(f"[Train Avg Video Flops] Epoch {epoch} : {avg_video_flops/1e12:.2f} TFLOPs")
 
             if self.rank == 0:
@@ -569,7 +547,6 @@ class TrainDDP:
                 self.writer.add_scalar("train/gumbel_temp", current_gumbel_temp, epoch)
                 self.writer.add_scalar("train/acc", meter_top1.avg, epoch)
                 self.writer.add_scalar("train/loss", meter_loss.avg, epoch)
-                # اضافه کردن FLOPs ویدیو به TensorBoard
                 self.writer.add_scalar("train/avg_video_flops", avg_video_flops, epoch)
                 self.writer.add_scalar("val/acc", val_meter.avg, epoch)
                 self.writer.add_scalar("val/avg_video_flops", val_avg_video_flops, epoch)
