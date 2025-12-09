@@ -257,6 +257,17 @@ class TrainDDP:
                         Flops_baseline = Flops_baselines[self.arch][self.args.dataset_type]
                         current_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
                         mask_loss = self.mask_loss(current_video_flops, Flops_baseline * (10**6), self.compress_rate).cuda()
+                        
+                        if self.rank == 0 and epoch == 1:
+                            self.logger.info(f"--- DEBUGGING LOSSES ---")
+                            self.logger.info(f"Current Video FLOPs: {current_video_flops.item() / 1e6:.2f} MFLOPs")
+                            self.logger.info(f"Target Video FLOPs: {Flops_baseline * (1 - self.compress_rate) / 1e6:.2f} MFLOPs")
+                            self.logger.info(f"Ori Loss: {ori_loss.item():.4f}")
+                            self.logger.info(f"KD Loss: {kd_loss.item():.4f}")
+                            self.logger.info(f"RC Loss: {rc_loss.item():.4f}")
+                            self.logger.info(f"Mask Loss: {mask_loss.item():.4f}") # <-- این مهم‌ترین است
+                            self.logger.info(f"--- END DEBUGGING ---")
+                            
                         total_loss = ori_loss + self.coef_kdloss * kd_loss + self.coef_rcloss * rc_loss + self.coef_maskloss * mask_loss
 
                     scaler.scale(total_loss).backward()
