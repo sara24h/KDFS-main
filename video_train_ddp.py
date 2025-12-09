@@ -39,14 +39,16 @@ class TrainDDP:
         self.dataset_mode = args.dataset_mode
         self.num_workers = args.num_workers
         self.pin_memory = args.pin_memory
-        # یک بار نام معماری را تمیز و نرمال کنید
-        self.arch = args.arch.lower().replace('_', '')
         self.seed = args.seed
         self.result_dir = args.result_dir
         self.teacher_ckpt_path = args.teacher_ckpt_path
         self.num_epochs = args.num_epochs
+        self.num_frames = getattr(args, 'num_frames', 16)
+        self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
+        self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
+        # کد صحیح:
         self.warmup_start_lr = args.warmup_start_lr
         self.lr_decay_T_max = args.lr_decay_T_max
         self.lr_decay_eta_min = args.lr_decay_eta_min
@@ -59,17 +61,10 @@ class TrainDDP:
         self.coef_kdloss = args.coef_kdloss
         self.coef_rcloss = args.coef_rcloss
         self.coef_maskloss = args.coef_maskloss
-        self.compress_rate = args.compress_rate
+        self.compress_rate=args.compress_rate
         self.resume = args.resume
-
-        # اضافه کردن پارامترهای ویدیویی با مقادیر پیش‌فرض
-        self.num_frames = getattr(args, 'num_frames', 16)
-        self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
-        self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
-
         self.start_epoch = 0
         self.best_prec1 = 0
-
         self.world_size = 0
         self.local_rank = -1
         self.rank = -1
@@ -79,11 +74,12 @@ class TrainDDP:
             self.num_classes = 1
             self.image_size = 256
         else:
-            raise ValueError("This script is configured for 'uadfv' dataset only.")
+            raise ValueError("dataset_mode must be 'uadfv' for this script")
 
-        if self.arch not in ['resnet50']:
-            raise ValueError(f"Unsupported architecture: '{self.arch}'. It must be 'resnet50'")
-        print("TrainDDP __init__ method executed.") # برای اطمینان از اجرا
+        self.arch = args.arch.lower().replace('_', '')
+        if self.arch not in ['resnet50', 'mobilenetv2', 'googlenet']:
+            raise ValueError(f"Unsupported architecture: '{args.arch}'. "
+                             "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
 
     def dist_init(self):
         dist.init_process_group("nccl")
@@ -125,7 +121,7 @@ class TrainDDP:
             torch.backends.cudnn.enabled = True
         print("setup_seed method executed.")
 
-    # تورفتگی این تابع اصلاح شده است
+
     def dataload(self):
         if self.dataset_mode == "uadfv":
             if self.rank == 0:
