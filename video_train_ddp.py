@@ -16,7 +16,7 @@ from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv, SoftMasked
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
-
+from utils.loss import compute_filter_correlation
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
@@ -46,6 +46,7 @@ class TrainDDP:
         self.num_epochs = args.num_epochs
         self.num_frames = getattr(args, 'num_frames', 16)
         self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
+        self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
         self.warmup_steps = args.warmup_steps
         self.warmup_start_lr = args.warmup_start_lr
@@ -189,6 +190,17 @@ class TrainDDP:
             last_epoch=-1, warmup_steps=self.warmup_steps, warmup_start_lr=self.warmup_start_lr
         )
 
+    # --- متد جدید برای محاسبه میانگین ماسک‌ها ---
+    def get_mask_averages(self):
+        """Get average mask values for each layer"""
+        mask_avgs = []
+        for m in self.student.module.mask_modules:
+            if isinstance(m, SoftMaskedConv2d):
+                with torch.no_grad():
+                    mask = torch.sigmoid(m.mask_weight)
+                    mask_avgs.append(round(mask.mean().item(), 2))
+        return mask_avgs
+
     def train(self):
         if self.rank == 0:
             self.logger.info(f"Starting training from epoch: {self.start_epoch + 1}")
@@ -209,20 +221,23 @@ class TrainDDP:
             self.student.train()
             self.student.module.ticket = False
             if self.rank == 0:
-                meter_oriloss.reset(); meter_kdloss.reset(); meter_rcloss.reset()
-                meter_maskloss.reset(); meter_loss.reset(); meter_top1.reset()
+                meter_oriloss.reset()
+                meter_kdloss.reset()
+                meter_rcloss.reset()
+                meter_maskloss.reset()
+                meter_loss.reset()
+                meter_top1.reset()
                 lr = self.optim_weight.param_groups[0]["lr"]
 
             self.student.module.update_gumbel_temperature(epoch)
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
-                if self.rank == 0: _tqdm.set_description("epoch: {}/{}".format(epoch, self.num_epochs))
-                
+                if self.rank == 0:
+                    _tqdm.set_description("epoch: {}/{}".format(epoch, self.num_epochs))
                 for videos, targets in self.train_loader:
                     self.optim_weight.zero_grad()
                     self.optim_mask.zero_grad()
                     videos = videos.cuda(non_blocking=True)
                     targets = targets.cuda(non_blocking=True).float()
-                    
                     batch_size, num_frames, C, H, W = videos.shape
                     images = videos.view(-1, C, H, W)
 
@@ -230,25 +245,19 @@ class TrainDDP:
                         logits_student, feature_list_student = self.student(images)
                         logits_student = logits_student.squeeze(1)
                         logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
-                        
                         with torch.no_grad():
                             logits_teacher, feature_list_teacher = self.teacher(images)
                             logits_teacher = logits_teacher.squeeze(1)
                             logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
-
                         ori_loss = self.ori_loss(logits_student, targets)
-                        kd_loss = (self.target_temperature**2) * self.kd_loss(logits_teacher, logits_student, self.target_temperature)
-                        
+                        kd_loss = (self.target_temperature ** 2) * self.kd_loss(logits_teacher, logits_student, self.target_temperature)
                         rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                         for i in range(len(feature_list_student)):
                             rc_loss = rc_loss + self.rc_loss(feature_list_student[i], feature_list_teacher[i])
                         rc_loss = rc_loss / len(feature_list_student)
-
-
-                        current_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
                         Flops_baseline = Flops_baselines[self.arch][self.args.dataset_type]
+                        current_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
                         mask_loss = self.mask_loss(current_video_flops, Flops_baseline * (10**6), self.compress_rate).cuda()
-
                         total_loss = ori_loss + self.coef_kdloss * kd_loss + self.coef_rcloss * rc_loss + self.coef_maskloss * mask_loss
 
                     scaler.scale(total_loss).backward()
@@ -262,7 +271,6 @@ class TrainDDP:
 
                     dist.barrier()
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1).cuda())
-
                     if self.rank == 0:
                         n = batch_size
                         meter_top1.update(reduced_prec1.item(), n)
@@ -272,6 +280,18 @@ class TrainDDP:
             self.scheduler_student_weight.step()
             self.scheduler_student_mask.step()
 
+            # --- شروع بخش لاگ‌گیری آموزش ---
+            if self.rank == 0:
+                # محاسبه FLOPs و میانگین ماسک‌ها برای آموزش
+                train_avg_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
+                train_mask_avgs = self.get_mask_averages()
+                
+                self.logger.info(f"[Train Avg Video Flops] Epoch {epoch} : {train_avg_video_flops/1e12:.2f} TFLOPs")
+                self.logger.info(f"[Train mask avg] Epoch {epoch} : {train_mask_avgs}")
+                self.writer.add_scalar("train/avg_video_flops", train_avg_video_flops, epoch)
+            # --- پایان بخش لاگ‌گیری آموزش ---
+
+            # --- شروع بخش اعتبارسنجی ---
             if self.rank == 0:
                 self.student.eval()
                 self.student.module.ticket = True
@@ -282,24 +302,31 @@ class TrainDDP:
                         val_targets = val_targets.cuda(non_blocking=True).float()
                         val_batch_size, val_num_frames, C, H, W = val_videos.shape
                         val_images = val_videos.view(-1, C, H, W)
-                        
                         val_logits, _ = self.student(val_images)
                         val_logits = val_logits.squeeze(1)
                         val_logits = val_logits.view(val_batch_size, val_num_frames).mean(dim=1)
-                        
                         val_preds = (torch.sigmoid(val_logits) > 0.5).float()
                         correct = (val_preds == val_targets).sum().item()
                         acc1 = 100. * correct / val_batch_size
                         val_meter.update(acc1, val_batch_size)
 
+                # محاسبه FLOPs و میانگین ماسک‌ها برای اعتبارسنجی
+                val_avg_video_flops = self.student.module.get_video_flops(num_frames=self.num_frames)
+                val_mask_avgs = self.get_mask_averages()
+                
                 self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
+                self.logger.info(f"[Val mask avg] Epoch {epoch} : {val_mask_avgs}")
+                self.logger.info(f"[Val Avg Video Flops] Epoch {epoch} : {val_avg_video_flops/1e12:.2f} TFLOPs")
+
                 self.writer.add_scalar("val/acc/top1", val_meter.avg, global_step=epoch)
+                self.writer.add_scalar("val/avg_video_flops", val_avg_video_flops, epoch)
 
                 if val_meter.avg > self.best_prec1:
                     self.best_prec1 = val_meter.avg
                     self.save_student_ckpt(True, epoch)
                 else:
                     self.save_student_ckpt(False, epoch)
+            # --- پایان بخش اعتبارسنجی ---
 
         if self.rank == 0:
             self.logger.info("Training finished!")
@@ -307,7 +334,8 @@ class TrainDDP:
     def save_student_ckpt(self, is_best, epoch):
         if self.rank == 0:
             folder = os.path.join(self.result_dir, "student_model")
-            if not os.path.exists(folder): os.makedirs(folder)
+            if not os.path.exists(folder):
+                os.makedirs(folder)
             ckpt_student = {
                 "best_prec1": self.best_prec1, "start_epoch": epoch,
                 "student": self.student.module.state_dict(),
@@ -316,7 +344,8 @@ class TrainDDP:
                 "scheduler_student_weight": self.scheduler_student_weight.state_dict(),
                 "scheduler_student_mask": self.scheduler_student_mask.state_dict(),
             }
-            if is_best: torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_best.pt"))
+            if is_best:
+                torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_best.pt"))
             torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_last.pt"))
 
     def reduce_tensor(self, tensor):
