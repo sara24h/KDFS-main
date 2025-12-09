@@ -11,13 +11,18 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 from torch.cuda.amp import autocast, GradScaler
-from data.dataset import Dataset_selector
-from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
+# از data.video_data برای دیتاست ویدیویی استفاده می‌کنیم
+from data.video_data import create_uadfv_dataloaders
+from model.student.ResNet_sparse_video import ResNet_50_sparse_uadfv, SoftMaskedConv2d
 from model.student.MobileNetV2_sparse import MobileNetV2_sparse_deepfake
+# برای پشتیبانی از googlenet این را اضافه کنید
+from model.student.GoogleNet_sparse import GoogLeNet_sparse_deepfake
 from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
 from model.teacher.MobilenetV2 import MobileNetV2_deepfake
+# برای پشتیبانی از googlenet این را اضافه کنید
+from model.teacher.GoogleNet import GoogLeNet_deepfake
 from torch import amp
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -30,8 +35,7 @@ Flops_baselines = {
         "200k": 5390.0,
         "330k": 5390.0,
         "190k": 5390.0,
-        "uadfv": 172690,
-        
+        "uadfv": 172690, # مقدار FLOPs برای ویدیو
     },
     "mobilenetv2": {
         "hardfakevsrealfaces": 7700.0,
@@ -40,7 +44,16 @@ Flops_baselines = {
         "200k": 416.68,
         "330k": 416.68,
         "190k": 416.68,
-        
+        "uadfv": 416.68, # مقدار FLOPs برای ویدیو
+    },
+    "googlenet": { # اضافه شده
+        "hardfakevsrealfaces": 7700.0,
+        "rvf10k": 416.68,
+        "140k": 416.68,
+        "200k": 416.68,
+        "330k": 416.68,
+        "190k": 416.68,
+        "uadfv": 416.68,
     }
 }
 
@@ -51,7 +64,8 @@ class TrainDDP:
         self.dataset_mode = args.dataset_mode
         self.num_workers = args.num_workers
         self.pin_memory = args.pin_memory
-        self.arch = args.arch
+        # یک بار نام معماری را تمیز و نرمال کنید
+        self.arch = args.arch.lower().replace('_', '')
         self.seed = args.seed
         self.result_dir = args.result_dir
         self.teacher_ckpt_path = args.teacher_ckpt_path
@@ -73,7 +87,10 @@ class TrainDDP:
         self.compress_rate = args.compress_rate
         self.resume = args.resume
 
-        self.dali = args.dali
+        # اضافه کردن پارامترهای ویدیویی با مقادیر پیش‌فرض
+        self.num_frames = getattr(args, 'num_frames', 16)
+        self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
+        self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
 
         self.start_epoch = 0
         self.best_prec1 = 0
@@ -87,14 +104,11 @@ class TrainDDP:
             self.num_classes = 1
             self.image_size = 256
         else:
-            raise ValueError("dataset_mode must be 'uadfv' for this script")
+            raise ValueError("This script is configured for 'uadfv' dataset only.")
 
-
-        self.arch = args.arch.lower().replace('_', '')
         if self.arch not in ['resnet50', 'mobilenetv2', 'googlenet']:
-            raise ValueError(f"Unsupported architecture: '{args.arch}'. "
-                             "It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
-
+            raise ValueError(f"Unsupported architecture: '{self.arch}'. It must be 'resnet50', 'mobilenetv2', or 'googlenet'.")
+        print("TrainDDP __init__ method executed.") # برای اطمینان از اجرا
 
     def dist_init(self):
         dist.init_process_group("nccl")
@@ -102,6 +116,7 @@ class TrainDDP:
         self.rank = dist.get_rank()
         self.local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(self.local_rank)
+        print("dist_init method executed.")
 
     def result_init(self):
         if self.rank == 0:
@@ -117,6 +132,7 @@ class TrainDDP:
                 self.args, os.path.join(self.result_dir, "train_config.txt")
             )
             self.logger.info("--------- Train -----------")
+        print("result_init method executed.")
 
     def setup_seed(self):
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -132,16 +148,15 @@ class TrainDDP:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.enabled = True
+        print("setup_seed method executed.")
 
-   def dataload(self):
+    # تورفتگی این تابع اصلاح شده است
+    def dataload(self):
         if self.dataset_mode == "uadfv":
-            from data.video_data import create_uadfv_dataloaders
-
             if self.rank == 0:
                 self.logger.info(f"Loading UADFV dataset from: {self.dataset_dir}")
                 self.logger.info(f"Number of frames per video: {self.num_frames}")
                 self.logger.info(f"Frame sampling strategy: {self.frame_sampling}")
-                self.logger.info(f"Split ratio (train/val/test): {self.split_ratio}")
 
             self.train_loader, self.val_loader, self.test_loader = create_uadfv_dataloaders(
                 root_dir=self.dataset_dir,
@@ -156,18 +171,9 @@ class TrainDDP:
                 sampling_strategy=self.frame_sampling
             )
 
-            # --- شروع بخش جدید: مشخصات میانگین ویدیو ---
-            if self.rank == 0:
-                self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
-                # مقادیر میانگین برای دیتاست UADFV که از قبل محاسبه کرده‌اید
-                self.avg_video_duration = 11.6  # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
-                self.avg_video_fps = 30.00      # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
-                self.logger.info(f"Average video duration set to: {self.avg_video_duration}s")
-                self.logger.info(f"Average video FPS set to: {self.avg_video_fps}")
-            # --- پایان بخش جدید ---
-
             if self.rank == 0:
                 self.logger.info("UADFV Dataset has been loaded!")
+        print("dataload method executed.")
 
     def build_model(self):
         if self.rank == 0:
@@ -178,6 +184,8 @@ class TrainDDP:
             teacher_model = ResNet_50_hardfakevsreal()
         elif self.arch == 'mobilenetv2':
             teacher_model = MobileNetV2_deepfake()
+        elif self.arch == 'googlenet': # اضافه شده
+            teacher_model = GoogLeNet_deepfake()
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
 
@@ -188,37 +196,23 @@ class TrainDDP:
             from collections import OrderedDict
             new_state_dict = OrderedDict()
             for k, v in state_dict.items():
-                name = k.replace('module.', '', 1)  
+                name = k.replace('module.', '', 1)
                 new_state_dict[name] = v
             state_dict = new_state_dict
-        
+
         teacher_model.load_state_dict(state_dict, strict=True)
         self.teacher = teacher_model.cuda()
 
         if self.rank == 0:
-            self.logger.info("Testing teacher model on validation batch...")
-            with torch.no_grad():
-                correct, total = 0, 0
-                for images, targets in self.val_loader:
-                    images, targets = images.cuda(), targets.cuda().float()
-                    logits, _ = self.teacher(images)
-                    logits = logits.squeeze(1)
-                    preds = (torch.sigmoid(logits) > 0.5).float()
-                    correct += (preds == targets).sum().item()
-                    total += images.size(0)
-                    break 
-                accuracy = 100. * correct / total
-                self.logger.info(f"Teacher accuracy on validation batch: {accuracy:.2f}%")
-
-        if self.rank == 0:
             self.logger.info("Building student model")
 
+        # منطق ساخت مدل دانش‌آموز ساده‌سازی شده
         if self.arch == 'resnet50':
-            StudentModelClass = (ResNet_50_sparse_uadfv
-                                 if self.dataset_mode != "hardfake"
-                                 else ResNet_50_sparse_hardfakevsreal)
-        elif self.arch.lower() == 'mobilenetv2':
+            StudentModelClass = ResNet_50_sparse_uadfv
+        elif self.arch == 'mobilenetv2':
             StudentModelClass = MobileNetV2_sparse_deepfake
+        elif self.arch == 'googlenet': # اضافه شده
+            StudentModelClass = GoogLeNet_sparse_deepfake
         else:
             raise ValueError(f"Unsupported architecture for student: {self.arch}")
 
@@ -229,39 +223,37 @@ class TrainDDP:
         )
 
         self.student.dataset_type = self.args.dataset_type
-        
         self.student = self.student.cuda()
 
-        if self.arch.lower() == 'mobilenetv2':
+        if self.arch == 'mobilenetv2':
             num_ftrs = self.student.classifier.in_features
             self.student.classifier = nn.Linear(num_ftrs, 1).cuda()
-        else:  
+        elif self.arch == 'googlenet': # اضافه شده
+            num_ftrs = self.student.fc.in_features
+            self.student.fc = nn.Linear(num_ftrs, 1).cuda()
+        else:  # resnet50
             num_ftrs = self.student.fc.in_features
             self.student.fc = nn.Linear(num_ftrs, 1).cuda()
 
         self.student = DDP(self.student, device_ids=[self.local_rank])
+        print("build_model method executed.")
 
     def define_loss(self):
         self.ori_loss = nn.BCEWithLogitsLoss().cuda()
         self.kd_loss = loss.KDLoss().cuda()
         self.rc_loss = loss.RCLoss().cuda()
         self.mask_loss = loss.MaskLoss().cuda()
+        print("define_loss method executed.")
 
     def define_optim(self):
-        weight_params = map(
-            lambda a: a[1],
-            filter(
-                lambda p: p[1].requires_grad and "mask" not in p[0],
-                self.student.module.named_parameters(),
-            ),
-        )
-        mask_params = map(
-            lambda a: a[1],
-            filter(
-                lambda p: p[1].requires_grad and "mask" in p[0],
-                self.student.module.named_parameters(),
-            ),
-        )
+        weight_params = []
+        mask_params = []
+        for name, param in self.student.module.named_parameters():
+            if param.requires_grad:
+                if "mask" in name.lower():
+                    mask_params.append(param)
+                else:
+                    weight_params.append(param)
 
         self.optim_weight = torch.optim.Adamax(
             weight_params, lr=self.lr, weight_decay=self.weight_decay, eps=1e-7
@@ -284,6 +276,7 @@ class TrainDDP:
             warmup_steps=self.warmup_steps,
             warmup_start_lr=self.warmup_start_lr,
         )
+        print("define_optim method executed.")
 
     def resume_student_ckpt(self):
         if not os.path.exists(self.resume):
@@ -294,14 +287,11 @@ class TrainDDP:
         self.student.module.load_state_dict(ckpt_student["student"])
         self.optim_weight.load_state_dict(ckpt_student["optim_weight"])
         self.optim_mask.load_state_dict(ckpt_student["optim_mask"])
-        self.scheduler_student_weight.load_state_dict(
-            ckpt_student["scheduler_student_weight"]
-        )
-        self.scheduler_student_mask.load_state_dict(
-            ckpt_student["scheduler_student_mask"]
-        )
+        self.scheduler_student_weight.load_state_dict(ckpt_student["scheduler_student_weight"])
+        self.scheduler_student_mask.load_state_dict(ckpt_student["scheduler_student_mask"])
         if self.rank == 0:
             self.logger.info("=> Continue from epoch {}...".format(self.start_epoch + 1))
+        print("resume_student_ckpt method executed.")
 
     def save_student_ckpt(self, is_best, epoch):
         if self.rank == 0:
@@ -319,11 +309,9 @@ class TrainDDP:
             ckpt_student["scheduler_student_mask"] = self.scheduler_student_mask.state_dict()
 
             if is_best:
-                torch.save(
-                    ckpt_student,
-                    os.path.join(folder, self.arch + "_sparse_best.pt"),
-                )
+                torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_best.pt"))
             torch.save(ckpt_student, os.path.join(folder, self.arch + "_sparse_last.pt"))
+        print("save_student_ckpt method executed.")
 
     def reduce_tensor(self, tensor):
         rt = tensor.clone()
@@ -371,13 +359,22 @@ class TrainDDP:
             with tqdm(total=len(self.train_loader), ncols=100, disable=self.rank != 0) as _tqdm:
                 if self.rank == 0:
                     _tqdm.set_description("epoch: {}/{}".format(epoch, self.num_epochs))
-                for images, targets in self.train_loader:
+                
+                # --- شروع بخش اصلاح‌شده برای داده‌های ویدیویی ---
+                for videos, targets in self.train_loader:
                     self.optim_weight.zero_grad()
                     self.optim_mask.zero_grad()
-                    images = images.cuda()
-                    targets = targets.cuda().float()
+                    videos = videos.cuda(non_blocking=True)
+                    targets = targets.cuda(non_blocking=True).float()
+                    
+                    batch_size, num_frames, C, H, W = videos.shape
+                    # تبدیل ویدیو به توالی فریم
+                    images = videos.view(-1, C, H, W)
+                    # تکرار برچسب برای هر فریم
+                    targets_expanded = targets.unsqueeze(1).repeat(1, num_frames).view(-1)
+                    # --- پایان بخش اصلاح‌شده ---
 
-                    if torch.isnan(images).any() or torch.isinf(images).any() or torch.isnan(targets).any() or torch.isinf(targets).any():
+                    if torch.isnan(images).any() or torch.isinf(images).any() or torch.isnan(targets_expanded).any() or torch.isinf(targets_expanded).any():
                         if self.rank == 0:
                             self.logger.warning("Invalid input detected (NaN or Inf)")
                         continue
@@ -385,17 +382,20 @@ class TrainDDP:
                     with autocast():
                         logits_student, feature_list_student = self.student(images)
                         logits_student = logits_student.squeeze(1)
+                        
                         with torch.no_grad():
                             logits_teacher, feature_list_teacher = self.teacher(images)
                             logits_teacher = logits_teacher.squeeze(1)
 
+                        # --- شروع بخش اصلاح‌شده برای محاسبه زیان در سطح ویدیو ---
+                        logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
+                        logits_teacher = logits_teacher.view(batch_size, num_frames).mean(dim=1)
+                        
                         ori_loss = self.ori_loss(logits_student, targets)
-
                         kd_loss = (self.target_temperature**2) * self.kd_loss(
-                            logits_teacher,
-                            logits_student,
-                            self.target_temperature
+                            logits_teacher, logits_student, self.target_temperature
                         )
+                        # --- پایان بخش اصلاح‌شده ---
 
                         rc_loss = torch.tensor(0.0, device=images.device, dtype=torch.float32)
                         for i in range(len(feature_list_student)):
@@ -423,7 +423,7 @@ class TrainDDP:
 
                     preds = (torch.sigmoid(logits_student) > 0.5).float()
                     correct = (preds == targets).sum().item()
-                    prec1 = 100. * correct / images.size(0)
+                    prec1 = 100. * correct / batch_size # محاسبه دقت بر اساس اندازه دسته ویدیو
 
                     dist.barrier()
                     reduced_ori_loss = self.reduce_tensor(ori_loss)
@@ -434,7 +434,7 @@ class TrainDDP:
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1).cuda())
 
                     if self.rank == 0:
-                        n = images.size(0)
+                        n = batch_size
                         meter_oriloss.update(reduced_ori_loss.item(), n)
                         meter_kdloss.update(self.coef_kdloss * reduced_kd_loss.item(), n)
                         meter_rcloss.update(
@@ -509,20 +509,23 @@ class TrainDDP:
                 with torch.no_grad():
                     with tqdm(total=len(self.val_loader), ncols=100) as _tqdm:
                         _tqdm.set_description("Validation epoch: {}/{}".format(epoch, self.num_epochs))
-                        for images, targets in self.val_loader:
-                            images = images.cuda()
-                            targets = targets.cuda().float()
-
-                            if torch.isnan(images).any() or torch.isinf(images).any() or torch.isnan(targets).any() or torch.isinf(targets).any():
-                                self.logger.warning("Invalid input detected in validation (NaN or Inf)")
-                                continue
-
-                            logits_student, _ = self.student(images)
+                        # --- شروع بخش اصلاح‌شده برای اعتبارسنجی ویدیویی ---
+                        for val_videos, val_targets in self.val_loader:
+                            val_videos = val_videos.cuda(non_blocking=True)
+                            val_targets = val_targets.cuda(non_blocking=True).float()
+                            
+                            val_batch_size, val_num_frames, C, H, W = val_videos.shape
+                            val_images = val_videos.view(-1, C, H, W)
+                            
+                            logits_student, _ = self.student(val_images)
                             logits_student = logits_student.squeeze(1)
+                            logits_student = logits_student.view(val_batch_size, val_num_frames).mean(dim=1)
+                            # --- پایان بخش اصلاح‌شده ---
+                            
                             preds = (torch.sigmoid(logits_student) > 0.5).float()
-                            correct = (preds == targets).sum().item()
-                            prec1 = 100. * correct / images.size(0)
-                            n = images.size(0)
+                            correct = (preds == val_targets).sum().item()
+                            prec1 = 100. * correct / val_batch_size
+                            n = val_batch_size
                             meter_top1.update(prec1, n)
 
                             _tqdm.set_postfix(
@@ -577,3 +580,4 @@ class TrainDDP:
         self.define_loss()
         self.define_optim()
         self.train()
+        print("main method finished.")
