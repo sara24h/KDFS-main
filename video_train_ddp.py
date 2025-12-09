@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler  # Updated import
 #from data.video_data import Dataset_selector
 from model.student.ResNet_sparse_video import (ResNet_50_sparse_uadfv,SoftMaskedConv2d)
 
@@ -18,11 +18,12 @@ from utils import utils, loss, meter, scheduler
 from thop import profile
 from model.teacher.ResNet import ResNet_50_hardfakevsreal
 
+from utils.loss import compute_filter_correlation
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 Flops_baselines = {
     "resnet50": {
-        "uadfv": 172690,  # Adjust based on your calculation for UADFV (e.g., per-frame baseline * avg_frames)
+        "uadfv": 172690.0,  # Adjust based on your calculation for UADFV (e.g., per-frame baseline * avg_frames)
     },
     "mobilenetv2": {
         "uadfv": 416.68,
@@ -89,7 +90,7 @@ class TrainDDP:
         if self.rank == 0:
             if not os.path.exists(self.result_dir):
                 os.makedirs(self.result_dir)
-            self.writer = SummaryWriter(self.result_dir)
+            # self.writer = SummaryWriter(self.result_dir)  # Commented to avoid protobuf issues
             self.logger = utils.get_logger(
                 os.path.join(self.result_dir, "train_logger.log"), "train_logger"
             )
@@ -135,15 +136,13 @@ class TrainDDP:
                 seed=self.seed,
                 sampling_strategy=self.frame_sampling
             )
-            # --- شروع بخش جدید: مشخصات میانگین ویدیو ---
+            # Set for all ranks
+            self.avg_video_duration = 11.6
+            self.avg_video_fps = 30.00
             if self.rank == 0:
                 self.logger.info("Using pre-calculated average video properties for FLOPs reporting.")
-                # مقادیر میانگین برای دیتاست UADFV که از قبل محاسبه کرده‌اید
-                self.avg_video_duration = 11.6 # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
-                self.avg_video_fps = 30.00 # <-- این مقدار را با میانگین واقعی خود جایگزین کنید
                 self.logger.info(f"Average video duration set to: {self.avg_video_duration}s")
                 self.logger.info(f"Average video FPS set to: {self.avg_video_fps}")
-            # --- پایان بخش جدید ---
             if self.rank == 0:
                 self.logger.info("UADFV Dataset has been loaded!")
 
@@ -153,7 +152,7 @@ class TrainDDP:
             self.logger.info("Loading teacher model")
         if self.arch == 'resnet50':
             teacher_model = ResNet_50_hardfakevsreal()
-      
+       
         else:
             raise ValueError(f"Unsupported architecture: {self.arch}")
         ckpt_teacher = torch.load(self.teacher_ckpt_path, map_location="cpu")
@@ -309,7 +308,7 @@ class TrainDDP:
             self.logger.info(f"Starting training from epoch: {self.start_epoch + 1}")
         torch.cuda.empty_cache()
         self.teacher.eval()
-        scaler = GradScaler()
+        scaler = GradScaler('cuda')  # Updated
         if self.resume:
             self.resume_student_ckpt()
         is_video_dataset = self.dataset_mode in ["uadfv"]
@@ -356,7 +355,7 @@ class TrainDDP:
                             if self.rank == 0:
                                 self.logger.warning("Invalid input detected (NaN or Inf)")
                             continue
-                        with autocast():
+                        with autocast('cuda'):  # Updated
                             logits_student, feature_list_student = self.student(images)
                             logits_student = logits_student.squeeze(1)
                             logits_student = logits_student.view(batch_size, num_frames).mean(dim=1)
@@ -394,10 +393,8 @@ class TrainDDP:
                                     self._rc_logged = True
                                     self.logger.info(f"RC Loss per layer: {rc_loss.item():.6f}")
                             # Modified mask_loss to use FLOPs penalty from second code
-                            Flops = self.student.module.get_video_flops(
-                                video_duration_seconds=self.avg_video_duration,
-                                fps=self.avg_video_fps
-                            )
+                            per_frame_flops = self.student.module.get_flops()  # Assume get_flops is per frame
+                            Flops = per_frame_flops * (self.avg_video_duration * self.avg_video_fps)
                             Flops_baseline = Flops_baselines[self.arch][self.dataset_mode]
                             mask_loss = self.mask_loss(
                                 Flops, Flops_baseline * (10**6), self.compress_rate
@@ -455,12 +452,8 @@ class TrainDDP:
                 if self.rank == 0:
                     self.student.module.ticket = False
                    
-                    # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
-                    avg_video_flops = self.student.module.get_video_flops(
-                        video_duration_seconds=self.avg_video_duration,
-                        fps=self.avg_video_fps
-                    )
-                    # --- پایان بخش اصلاح‌شده ---
+                    per_frame_flops = self.student.module.get_flops()
+                    avg_video_flops = per_frame_flops * (self.avg_video_duration * self.avg_video_fps)
                     self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
                                     f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
                                     f"KDLoss {meter_kdloss.avg:.4f} RCLoss {meter_rcloss.avg:.6f} "
@@ -490,12 +483,8 @@ class TrainDDP:
                         val_meter.update(acc1, val_batch_size)
                 mask_avgs = self.get_mask_averages()
                
-                # --- شروع بخش اصلاح‌شده برای محاسبه FLOPs ویدیو ---
-                val_avg_video_flops = self.student.module.get_video_flops(
-                    video_duration_seconds=self.avg_video_duration,
-                    fps=self.avg_video_fps
-                )
-                # --- پایان بخش اصلاح‌شده ---
+                val_per_frame_flops = self.student.module.get_flops()
+                val_avg_video_flops = val_per_frame_flops * (self.avg_video_duration * self.avg_video_fps)
                
                 self.logger.info(f"[Val] Epoch {epoch} : Val_Acc {val_meter.avg:.2f}")
                 self.logger.info(f"[Val mask avg] Epoch {epoch} : {mask_avgs}")
@@ -503,14 +492,8 @@ class TrainDDP:
                 self.scheduler_student_weight.step()
                 if self.scheduler_student_mask is not None:
                     self.scheduler_student_mask.step()
-                self.writer.add_scalar("train/lr", current_lr, epoch)
-                self.writer.add_scalar("train/gumbel_temp", current_gumbel_temp, epoch)
-                self.writer.add_scalar("train/acc", meter_top1.avg, epoch)
-                self.writer.add_scalar("train/loss", meter_loss.avg, epoch)
-                # اضافه کردن FLOPs ویدیو به TensorBoard
-                self.writer.add_scalar("train/avg_video_flops", avg_video_flops, epoch)
-                self.writer.add_scalar("val/acc", val_meter.avg, epoch)
-                self.writer.add_scalar("val/avg_video_flops", val_avg_video_flops, epoch)
+                # self.writer.add_scalar("train/lr", current_lr, epoch)  # Commented
+                # Add other writer calls commented if needed
                 if val_meter.avg > self.best_prec1:
                     self.best_prec1 = val_meter.avg
                     self.logger.info(f" => Best top1 accuracy on validation before finetune : {self.best_prec1}")
