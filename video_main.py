@@ -91,14 +91,7 @@ def parse_args():
         type=str,
         default="ResNet_50",
         choices=(
-            "ResNet_18",
             "ResNet_50",
-            "VGG_16_bn",
-            "resnet_56",
-            "resnet_110",
-            "DenseNet_40",
-            "GoogLeNet",
-            "MobileNetV2",
         ),
         help="The architecture to prune",
     )
