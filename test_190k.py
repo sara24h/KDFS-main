@@ -1,5 +1,5 @@
 import os
-import random  # <--- اضافه شده
+import random
 import torch
 from tqdm import tqdm
 import torchvision.transforms as transforms
@@ -8,6 +8,7 @@ import numpy as np
 from sklearn.metrics import precision_score, recall_score, confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+# فرض می‌کنیم این فایل‌ها در همان مسیر یا مسیر نصب پایتون شما قابل دسترسی هستند
 from data.dataset import Dataset_selector
 from model.student.ResNet_sparse import ResNet_50_sparse_hardfakevsreal
 from utils import meter
@@ -32,33 +33,32 @@ def set_seed(seed: int):
     print(f"Seed set to {seed} for reproducibility.")
 
 class Test:
-    def __init__(self, args):
-        self.args = args
+    def __init__(self, config):
+        # به جای args از config استفاده می‌کنیم
+        self.config = config
         
         # <--- فراخوانی تابع set_seed --->
-        # مقدار seed را از args می‌گیرد. اگر وجود نداشت، از مقدار پیش‌فرض 42 استفاده می‌کند.
-        self.seed = getattr(args, 'seed', 42)
-        set_seed(self.seed)
+        set_seed(self.config.seed)
         # ----------------------------------
         
-        self.dataset_dir = args.dataset_dir
-        self.num_workers = args.num_workers
-        self.pin_memory = args.pin_memory
-        self.arch = args.arch
-        self.device = args.device
-        self.train_batch_size = args.train_batch_size
-        self.test_batch_size = args.test_batch_size
-        self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
-        self.dataset_mode = args.dataset_mode
-        self.result_dir = args.result_dir
-        self.new_dataset_dir = getattr(args, 'new_dataset_dir', None) # New dataset directory
+        self.dataset_dir = self.config.dataset_dir
+        self.num_workers = self.config.num_workers
+        self.pin_memory = self.config.pin_memory
+        self.arch = self.config.arch
+        self.device = self.config.device
+        self.train_batch_size = self.config.train_batch_size
+        self.test_batch_size = self.config.test_batch_size
+        self.sparsed_student_ckpt_path = self.config.sparsed_student_ckpt_path
+        self.dataset_mode = self.config.dataset_mode
+        self.result_dir = self.config.result_dir
+        self.new_dataset_dir = self.config.new_dataset_dir
         if self.device == 'cuda' and not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available! Please check GPU setup!")
            
         self.train_loader = None
         self.val_loader = None
         self.test_loader = None
-        self.new_test_loader = None # Loader for new test dataset
+        self.new_test_loader = None
         self.student = None
 
     def dataload(self):
@@ -111,6 +111,7 @@ class Test:
             params['realfake190k_root_dir'] = self.dataset_dir
         elif self.dataset_mode == '330k':
             params['realfake330k_root_dir'] = self.dataset_dir
+        
         dataset_manager = Dataset_selector(**params)
         print("Overriding transforms to use consistent 190k normalization stats for all datasets.")
         dataset_manager.loader_train.dataset.transform = transform_train_190k
@@ -280,12 +281,13 @@ class Test:
                 print(f"Unfreezing for training: {name}")
             else:
                 param.requires_grad = False
-        weight_decay = getattr(self.args, 'weight_decay', 1e-3)
-        print(f"Applied fine-tuning hyperparameters: f_lr={self.args.f_lr}, weight_decay={weight_decay}")
+        
+        weight_decay = self.config.weight_decay
+        print(f"Applied fine-tuning hyperparameters: f_lr={self.config.f_lr}, weight_decay={weight_decay}")
        
         optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, self.student.parameters()),
-            lr=self.args.f_lr,
+            lr=self.config.f_lr,
             weight_decay=weight_decay
         )
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
@@ -295,12 +297,12 @@ class Test:
        
         best_val_acc = 0.0
         best_model_path = os.path.join(self.result_dir, f'finetuned_model_best_{self.dataset_mode}.pth')
-        for epoch in range(self.args.f_epochs):
+        for epoch in range(self.config.f_epochs):
             self.student.train()
             meter_loss = meter.AverageMeter("Loss", ":6.4f")
             meter_top1_train = meter.AverageMeter("Train Acc@1", ":6.2f")
            
-            for images, targets in tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.args.f_epochs} [Train]", ncols=100):
+            for images, targets in tqdm(self.train_loader, desc=f"Epoch {epoch+1}/{self.config.f_epochs} [Train]", ncols=100):
                 images, targets = images.to(self.device), targets.to(self.device).float()
                 optimizer.zero_grad()
                 logits, _ = self.student(images)
@@ -315,7 +317,7 @@ class Test:
                 meter_loss.update(loss.item(), images.size(0))
                 meter_top1_train.update(prec1, images.size(0))
             
-            val_metrics = self.compute_metrics(self.val_loader, description=f"Epoch_{epoch+1}_{self.args.f_epochs}_Val", print_metrics=False, save_confusion_matrix=False)
+            val_metrics = self.compute_metrics(self.val_loader, description=f"Epoch_{epoch+1}_{self.config.f_epochs}_Val", print_metrics=False, save_confusion_matrix=False)
             val_acc = val_metrics['accuracy']
            
             print(f"Epoch {epoch+1}: Train Loss: {meter_loss.avg:.4f}, Train Acc: {meter_top1_train.avg:.2f}%, Val Acc: {val_acc:.2f}%")
@@ -371,3 +373,49 @@ class Test:
             print("\n--- Testing on NEW dataset ---")
             new_metrics = self.compute_metrics(self.new_test_loader, "New_Dataset_Test")
             self.display_samples(new_metrics['sample_info'], "New Dataset Test", num_samples=30)
+
+# <--- بخش پیکربندی و اجرای اصلی --->
+class Config:
+    """
+    کلاسی برای نگهداری تمام پارامترهای پیکربندی.
+    به راحتی مقادیر زیر را تغییر دهید.
+    """
+    def __init__(self):
+        # --- پارامترهای اصلی ---
+        self.seed = 42  # برای تکرارپذیری نتایج
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.arch = "ResNet_50" # معماری مدل
+        
+        # --- پارامترهای دیتاست ---
+        self.dataset_mode = "190k" # گزینه‌ها: hardfake, rvf10k, 140k, 200k, 190k, 330k
+        self.dataset_dir = "/path/to/your/dataset" # << مسیر دیتاست اصلی خود را اینجا قرار دهید
+        self.new_dataset_dir = None # یا مسیر یک دیتاست تست جدید را قرار دهید
+        
+        # --- پارامترهای مدل و چک‌پوینت ---
+        self.sparsed_student_ckpt_path = "/path/to/your/sparsed_student_model.pth" # << مسیر مدل دانشجوی prune شده
+
+        # --- پارامترهای لودر دیتا ---
+        self.train_batch_size = 32
+        self.test_batch_size = 64
+        self.num_workers = 4
+        self.pin_memory = True
+
+        # --- پارامترهای فاین‌تیونینگ ---
+        self.f_epochs = 10
+        self.f_lr = 0.001
+        self.weight_decay = 0.0001
+
+        # --- پارامترهای خروجی ---
+        self.result_dir = "./results" # پوشه‌ای برای ذخیره نتایج و مدل فاین‌تیون شده
+
+if __name__ == "__main__":
+    """
+    نقطه شروع اجرای اسکریپت.
+    """
+    # 1. یک نمونه از کلاس پیکربندی بسازید
+    config = Config()
+    
+    # 2. نمونه از کلاس Test ایجاد کرده و متد main را فراخوانی کنید
+    # تمام مراحل تست و فاین‌تیونینگ به ترتیب اجرا خواهند شد
+    test_pipeline = Test(config)
+    test_pipeline.main()
