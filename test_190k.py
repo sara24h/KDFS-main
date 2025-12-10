@@ -374,43 +374,73 @@ class Test:
             new_metrics = self.compute_metrics(self.new_test_loader, "New_Dataset_Test")
             self.display_samples(new_metrics['sample_info'], "New Dataset Test", num_samples=30)
 
-# <--- بخش پیکربندی و اجرای اصلی --->
+# ====================== اضافه کن این قسمت رو ======================
+import argparse
+import ast
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Fine-tune Sparse ResNet50 on RVF10K or any dataset")
+    
+    # --- مسیرها ---
+    parser.add_argument('--sparsed_student_ckpt_path', type=str, required=True,
+                        help='Path to the pruned/finetuned student checkpoint')
+    parser.add_argument('--dataset_dir', type=str, default="/kaggle/input/rvf10k",
+                        help='Root directory of the dataset (for 190k, rvf10k, etc.)')
+    parser.add_argument('--new_dataset_dir', type=str, default=None,
+                        help='Optional: external test dataset directory')
+    
+    # --- تنظیمات دیتاست ---
+    parser.add_argument('--dataset_mode', type=str, default="rvf10k",
+                        choices=['hardfake', 'rvf10k', '140k', '190k', '200k', '330k'],
+                        help='Which dataset structure to use')
+    
+    # --- هایپرپارامترهای فاین‌تیونینگ ---
+    parser.add_argument('--f_epochs', type=int, default=10)
+    parser.add_argument('--f_lr', type=float, default=1e-4)
+    parser.add_argument('--f_weight_decay', type=float, default=1e-5)
+    
+    # --- بچ سایز و سخت‌افزار ---
+    parser.add_argument('--train_batch_size', type=int, default=32)
+    parser.add_argument('--test_batch_size', type=int, default=64)
+    parser.add_argument('--num_workers', type=int, default=4)
+    
+    # --- خروجی ---
+    parser.add_argument('--result_dir', type=str, default="/kaggle/working/results")
+    
+    return parser.parse_args()
+
+
+# جایگزین کردن کلاس Config با آرگومان‌های خط فرمان
 class Config:
-  
     def __init__(self):
-        # --- پارامترهای اصلی ---
-        self.seed = 42  # برای تکرارپذیری نتایج
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.arch = "ResNet_50" 
-        self.dataset_mode = "190k" # گزینه‌ها: hardfake, rvf10k, 140k, 200k, 190k, 330k
-        self.dataset_dir = "/path/to/your/dataset" # << مسیر دیتاست اصلی خود را اینجا قرار دهید
-        self.new_dataset_dir = None # یا مسیر یک دیتاست تست جدید را قرار دهید
+        args = parse_args()  # این خط همه آرگومان‌ها رو می‌خونه
         
-        # --- پارامترهای مدل و چک‌پوینت ---
-        self.sparsed_student_ckpt_path = "/path/to/your/sparsed_student_model.pth" # << مسیر مدل دانشجوی prune شده
-
-        # --- پارامترهای لودر دیتا ---
-        self.train_batch_size = 32
-        self.test_batch_size = 64
-        self.num_workers = 4
+        self.seed = 3407
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        
+        # اینا از خط فرمان میان
+        self.dataset_mode = args.dataset_mode
+        self.dataset_dir = args.dataset_dir
+        self.new_dataset_dir = args.new_dataset_dir
+        self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
+        self.result_dir = args.result_dir
+        
+        self.train_batch_size = args.train_batch_size
+        self.test_batch_size = args.test_batch_size
+        self.num_workers = args.num_workers
         self.pin_memory = True
-
-        # --- پارامترهای فاین‌تیونینگ ---
-        self.f_epochs = 10
-        self.f_lr = 0.001
-        self.weight_decay = 0.0001
-
-        # --- پارامترهای خروجی ---
-        self.result_dir = "./results" # پوشه‌ای برای ذخیره نتایج و مدل فاین‌تیون شده
+        
+        self.f_epochs = args.f_epochs
+        self.f_lr = args.f_lr
+        self.weight_decay = args.f_weight_decay  # توجه: اینجا weight_decay معمولیه، نه فقط برای فاین‌تیون استفاده می‌شه
+        
+        # ساخت پوشه خروجی
+        os.makedirs(self.result_dir, exist_ok=True)
+# =====================================================================
 
 if __name__ == "__main__":
-    """
-    نقطه شروع اجرای اسکریپت.
-    """
-    # 1. یک نمونه از کلاس پیکربندی بسازید
+
     config = Config()
-    
-    # 2. نمونه از کلاس Test ایجاد کرده و متد main را فراخوانی کنید
-    # تمام مراحل تست و فاین‌تیونینگ به ترتیب اجرا خواهند شد
+
     test_pipeline = Test(config)
     test_pipeline.main()
