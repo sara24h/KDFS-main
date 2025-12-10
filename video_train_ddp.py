@@ -465,9 +465,10 @@ class TrainDDP:
                                     self._rc_logged = True
                                     self.logger.info(f"RC Loss per layer: {rc_loss.item():.6f}")
 
+                        
                             Flops_baseline = Flops_baselines[self.arch][self.args.dataset_type]
                             Flops = self.student.module.get_flops()
-                                mask_loss = self.mask_loss(
+                            mask_loss = self.mask_loss(
                                 Flops, Flops_baseline * (10**9), self.compress_rate
                             ).cuda()
 
