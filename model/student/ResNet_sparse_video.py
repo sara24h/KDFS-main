@@ -95,10 +95,8 @@ class MaskedNet(nn.Module):
         return Flops_total
 
     # --- اصلاح شد: تابع برای پذیرش پارامتر num_frames ---
-    def get_video_flops(self, num_frames=16):
-        """
-        محاسبه FLOPs برای کل ویدیو بر اساس تعداد فریم‌های نمونه‌برداری شده.
-        """
+    def get_video_flops(self, num_sampled_frames=32):
+       
         flops_per_frame = self.get_flops()
         total_video_flops = flops_per_frame * num_frames
         return total_video_flops
