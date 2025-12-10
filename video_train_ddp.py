@@ -53,7 +53,7 @@ class TrainDDP:
         self.result_dir = args.result_dir
         self.teacher_ckpt_path = args.teacher_ckpt_path
         self.num_epochs = args.num_epochs
-        self.num_frames = getattr(args, 'num_frames', 16)
+        self.num_frames = getattr(args, 'num_frames', 32)
         self.frame_sampling = getattr(args, 'frame_sampling', 'uniform')
         self.split_ratio = getattr(args, 'split_ratio', (0.7, 0.15, 0.15))
         self.lr = args.lr
@@ -512,7 +512,7 @@ class TrainDDP:
 
                 if self.rank == 0:
                     self.student.module.ticket = False
-                    avg_video_flops = self.student.module.get_video_flops_sampled(num_sampled_frames=self.num_frames)
+                    avg_video_flops = self.student.module.get_video_flops(num_sampled_frames=self.num_frames)
 
                     self.logger.info(f"[Train] Epoch {epoch} : Gumbel_temperature {current_gumbel_temp:.2f} "
                                     f"LR {current_lr:.6f} OriLoss {meter_oriloss.avg:.4f} "
