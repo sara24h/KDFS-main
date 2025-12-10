@@ -4,10 +4,12 @@ import torch.nn.functional as F
 import copy
 import math
 from thop import profile
+# فرض بر این است که فایل layer.py در کنار این فایل قرار دارد
+# و شامل کلاس SoftMaskedConv2d است.
 from .layer import SoftMaskedConv2d
 
 class MaskedNet(nn.Module):
-
+  
     def __init__(self, gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
         super().__init__()
         self.gumbel_start_temperature = gumbel_start_temperature
@@ -43,19 +45,25 @@ class MaskedNet(nn.Module):
             m.update_gumbel_temperature(self.gumbel_temperature)
 
     def get_flops(self):
+        """
+        FLOPs (تعداد عملیات شناور) را برای مدل بر روی یک تصویر ورودی محاسبه می‌کند.
+        این محاسبه به اندازه تصویر ورودی بستگی دارد که از طریق dataset_type مشخص می‌شود.
+        """
         device = next(self.parameters()).device
         Flops_total = torch.tensor(0.0, device=device)
         
+        # دیکشنری اندازه تصاویر ورودی برای هر دیتاست
         image_sizes = {
             "hardfakevsrealfaces": 300,
             "rvf10k": 256,
             "140k": 256,
-            "uadfv": 256
+            "uadfv": 256  # اندازه تصویر برای دیتاست UADFV
         }
         
         dataset_type = getattr(self, "dataset_type", "hardfakevsrealfaces")
-        input_size = image_sizes.get(dataset_type, 256)
+        input_size = image_sizes.get(dataset_type, 256) # مقدار پیش‌فرض 256 در صورت عدم وجود
         
+        # محاسبه FLOPs برای لایه‌های اولیه (conv1, bn1)
         conv1_h = (input_size - 7 + 2 * 3) // 2 + 1
         maxpool_h = (conv1_h - 3 + 2 * 1) // 2 + 1
         
@@ -64,24 +72,27 @@ class MaskedNet(nn.Module):
             conv1_h * conv1_h * 64                 # FLOPs for bn1 (simplified)
         )
         
+        # محاسبه FLOPs برای بلوک‌های ResNet با کانولوشن‌های ماسک‌دار
         for i, m in enumerate(self.mask_modules):
             m = m.to(device)
             Flops_shortcut_conv = 0
             Flops_shortcut_bn = 0
             
+            # محاسبات مخصوص ResNet-50 (48 لایه ماسک‌دار)
             if len(self.mask_modules) == 48:
-                if i % 3 == 0:
+                if i % 3 == 0:  # لایه اول در هر بلوک Bottleneck
                     Flops_conv = (
                         m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
                         m.in_channels * m.mask.sum()
                     )
-                else:
+                else:  # لایه‌های دوم و سوم در هر بلوک Bottleneck
                     Flops_conv = (
                         m.feature_map_h * m.feature_map_w * m.kernel_size * m.kernel_size *
                         self.mask_modules[i - 1].mask.to(device).sum() * m.mask.sum()
                     )
                 Flops_bn = m.feature_map_h * m.feature_map_w * m.mask.sum()
                 
+                # محاسبه FLOPs برای اتصال کوتاه (shortcut) در صورت وجود
                 if i % 3 == 2 and m.stride != 1:
                      Flops_shortcut_conv = (
                         m.feature_map_h * m.feature_map_w * 1 * 1 *
@@ -94,13 +105,13 @@ class MaskedNet(nn.Module):
             )
         return Flops_total
 
-    # --- اصلاح شد: تابع برای پذیرش پارامتر num_frames ---
-    def get_video_flops(self, num_sampled_frames=32):
-       
+    def get_video_flops_sampled(self, num_sampled_frames):
         flops_per_frame = self.get_flops()
-        total_video_flops = flops_per_frame * num_frames
+        total_video_flops = flops_per_frame * num_sampled_frames
         return total_video_flops
 
+# کلاس‌های BasicBlock_sparse و Bottleneck_sparse بدون تغییر باقی می‌مانند
+# ... (کدهای این کلاس‌ها را از پاسخ قبلی کپی کنید) ...
 class BasicBlock_sparse(nn.Module):
     expansion = 1
     def __init__(self, in_planes, planes, stride=1):
@@ -115,7 +126,6 @@ class BasicBlock_sparse(nn.Module):
                 nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(self.expansion * planes),
             )
-    # --- اصلاح شد: حذف پرانتز اضافی ---
     def forward(self, x, ticket):
         out = F.relu(self.bn1(self.conv1(x, ticket)))
         out = self.bn2(self.conv2(out, ticket))
@@ -139,7 +149,6 @@ class Bottleneck_sparse(nn.Module):
                 nn.Conv2d(in_planes, self.expansion * planes, kernel_size=1, stride=stride, bias=False),
                 nn.BatchNorm2d(self.expansion * planes),
             )
-    # --- اصلاح شد: حذف پرانتز اضافی ---
     def forward(self, x, ticket):
         out = F.relu(self.bn1(self.conv1(x, ticket)))
         out = F.relu(self.bn2(self.conv2(out, ticket)))
@@ -199,3 +208,27 @@ def ResNet_50_sparse_uadfv(gumbel_start_temperature=2.0, gumbel_end_temperature=
 
 def ResNet_50_sparse_rvf10k(gumbel_start_temperature=2.0, gumbel_end_temperature=0.5, num_epochs=200):
     return ResNet_sparse(block=Bottleneck_sparse, num_blocks=[3, 4, 6, 3], num_classes=1, gumbel_start_temperature=gumbel_start_temperature, gumbel_end_temperature=gumbel_end_temperature, num_epochs=num_epochs, dataset_type="rvf10k")
+
+# --- مثال نحوه استفاده ---
+if __name__ == '__main__':
+
+    try:
+        model = ResNet_50_sparse_uadfv()
+        model.eval() # قرار دادن مدل در حالت ارزیابی
+
+        video_duration = 11.6  # مدت زمان واقعی ویدیو به ثانیه
+        video_fps = 30.00      # نرخ فریم واقعی ویدیو
+
+        # 3. محاسبه FLOPs برای کل ویدیو با استفاده از تابع جدید
+        total_video_flops = model.get_video_flops(video_duration_seconds=video_duration, fps=video_fps)
+        
+        print(f"--- FLOPs برای پردازش ویدیوی /kaggle/input/uadfv-dataset/UADFV/real/0008.mp4 ---")
+        print(f"پارامترهای ویدیو: مدت زمان = {video_duration} ثانیه, نرخ فریم = {video_fps} FPS")
+        print(f"تعداد کل فریم‌ها: {int(video_duration * video_fps)}")
+        print(f"مجموع FLOPs: {total_video_flops / 1e12:.2f} TFLOPs")
+
+    except NameError:
+        print("\nخطا: کلاس SoftMaskedConv2d یافت نشد.")
+        print("لطفاً مطمئن شوید که فایل layer.py به درستی import شده و کلاس مورد نظر در آن تعریف شده است.")
+    except Exception as e:
+        print(f"\nیک خطای پیش‌بینی نشده رخ داد: {e}")
