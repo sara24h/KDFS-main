@@ -490,7 +490,7 @@ class TrainDDP:
                     reduced_mask_loss = self.reduce_tensor(mask_loss.detach())
                     reduced_total_loss = self.reduce_tensor(total_loss.detach())
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device='cuda'))
-                    reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr, device='cuda'))
+                    #reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr, device='cuda'))
                     #reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
 
                     if self.rank == 0:
