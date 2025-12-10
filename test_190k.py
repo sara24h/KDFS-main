@@ -378,65 +378,84 @@ class Test:
 import argparse
 import ast
 
+# ====================== بهترین نسخه Config برای همه دیتاست‌ها ======================
+import argparse
+import os
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Fine-tune Sparse ResNet50 on RVF10K or any dataset")
+    parser = argparse.ArgumentParser(description="Fine-tune Sparse ResNet50 on ANY dataset")
     
-    # --- مسیرها ---
     parser.add_argument('--sparsed_student_ckpt_path', type=str, required=True,
-                        help='Path to the pruned/finetuned student checkpoint')
-    parser.add_argument('--dataset_dir', type=str, default="/kaggle/input/rvf10k",
-                        help='Root directory of the dataset (for 190k, rvf10k, etc.)')
-    parser.add_argument('--new_dataset_dir', type=str, default=None,
-                        help='Optional: external test dataset directory')
+                        help='Path to the pruned student checkpoint')
     
-    # --- تنظیمات دیتاست ---
     parser.add_argument('--dataset_mode', type=str, default="rvf10k",
-                        choices=['hardfake', 'rvf10k', '140k', '190k', '200k', '330k'],
-                        help='Which dataset structure to use')
+                        choices=['rvf10k', '190k', '140k', '200k', 'hardfake', '330k'],
+                        help='Which dataset to use')
     
-    # --- هایپرپارامترهای فاین‌تیونینگ ---
-    parser.add_argument('--f_epochs', type=int, default=10)
-    parser.add_argument('--f_lr', type=float, default=1e-4)
+    parser.add_argument('--dataset_dir', type=str, default=None,
+                        help='Custom path (optional, auto-detected for most datasets)')
+    
+    parser.add_argument('--new_dataset_dir', type=str, default=None,
+                        help='External test dataset (e.g. Celeb-DF, FF++)')
+    
+    parser.add_argument('--f_epochs', type=float, default=1e-4, dest='f_lr',
+                        help='Fine-tuning learning rate')
+    parser.add_argument('--f_epochs', type=int, default=12)
     parser.add_argument('--f_weight_decay', type=float, default=1e-5)
     
-    # --- بچ سایز و سخت‌افزار ---
     parser.add_argument('--train_batch_size', type=int, default=32)
     parser.add_argument('--test_batch_size', type=int, default=64)
-    parser.add_argument('--num_workers', type=int, default=4)
-    
-    # --- خروجی ---
     parser.add_argument('--result_dir', type=str, default="/kaggle/working/results")
     
     return parser.parse_args()
 
 
-# جایگزین کردن کلاس Config با آرگومان‌های خط فرمان
+# مسیرهای خودکار برای دیتاست‌های معروف کگل
+AUTO_PATHS = {
+    "rvf10k":    "/kaggle/input/rvf10k",
+    "190k":      "/kaggle/input/deepfake-and-real-images/Dataset",
+    "140k":      "/kaggle/input/140k-real-and-fake-faces/real_vs_fake/real-vs-fake",
+    "200k":      "/kaggle/input/200k-real-and-fake-faces",
+    "hardfake":  "/kaggle/input/hardfakevsrealfaces",
+    # اگه بعداً 330k آپلود کردی، اینجا اضافه کن
+    # "330k":    "/kaggle/input/your-330k-dataset",
+}
+
 class Config:
     def __init__(self):
-        args = parse_args()  # این خط همه آرگومان‌ها رو می‌خونه
-        
+        args = parse_args()
+
         self.seed = 3407
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # اینا از خط فرمان میان
+
         self.dataset_mode = args.dataset_mode
-        self.dataset_dir = args.dataset_dir
+        # خودکار مسیر رو پیدا می‌کنه، اگه ندادی
+        self.dataset_dir = args.dataset_dir or AUTO_PATHS.get(self.dataset_mode, None)
+        if self.dataset_dir is None:
+            raise ValueError(f"Dataset '{self.dataset_mode}' not found! Use --dataset_dir to specify path.")
+
         self.new_dataset_dir = args.new_dataset_dir
         self.sparsed_student_ckpt_path = args.sparsed_student_ckpt_path
         self.result_dir = args.result_dir
-        
+        os.makedirs(self.result_dir, exist_ok=True)
+
         self.train_batch_size = args.train_batch_size
         self.test_batch_size = args.test_batch_size
-        self.num_workers = args.num_workers
+        self.num_workers = 4
         self.pin_memory = True
-        
+
         self.f_epochs = args.f_epochs
         self.f_lr = args.f_lr
-        self.weight_decay = args.f_weight_decay  # توجه: اینجا weight_decay معمولیه، نه فقط برای فاین‌تیون استفاده می‌شه
-        
-        # ساخت پوشه خروجی
-        os.makedirs(self.result_dir, exist_ok=True)
-# =====================================================================
+        self.weight_decay = args.f_weight_decay
+
+        # چاپ برای اینکه مطمئن شی همه چیز درسته
+        print("="*60)
+        print(f"Dataset Mode → {self.dataset_mode}")
+        print(f"Dataset Path → {self.dataset_dir}")
+        print(f"Checkpoint   → {self.sparsed_student_ckpt_path}")
+        print(f"Output Dir   → {self.result_dir}")
+        print("="*60)
+# =================================================================================
 
 if __name__ == "__main__":
 
