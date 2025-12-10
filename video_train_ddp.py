@@ -266,7 +266,8 @@ class TrainDDP:
         self.scheduler_student_mask = None
 
         if mask_params:
-            self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr, eps=1e-7)
+           
+            self.optim_mask = torch.optim.Adamax(mask_params, lr=self.lr * 10, weight_decay=1e-4, eps=1e-7)
             self.scheduler_student_mask = scheduler.CosineAnnealingLRWarmup(
                 self.optim_mask, T_max=self.lr_decay_T_max,
                 eta_min=self.lr_decay_eta_min, last_epoch=-1,
