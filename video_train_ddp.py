@@ -369,7 +369,7 @@ class TrainDDP:
             meter_maskloss = meter.AverageMeter("MaskLoss", ":.6e")
             meter_loss = meter.AverageMeter("Loss", ":.4e")
             meter_top1 = meter.AverageMeter("Acc@1", ":6.2f")
-            meter_avg_corr = meter.AverageMeter("L_corr", ":.6f")
+            #meter_avg_corr = meter.AverageMeter("L_corr", ":.6f")
         
 
         for epoch in range(self.start_epoch + 1, self.num_epochs + 1):
@@ -384,7 +384,7 @@ class TrainDDP:
                 meter_maskloss.reset()
                 meter_loss.reset()
                 meter_top1.reset()
-                meter_avg_corr.reset()
+                #meter_avg_corr.reset()
               
 
                 current_lr = self.optim_weight.param_groups[0]['lr']
@@ -471,18 +471,7 @@ class TrainDDP:
                                 self.coef_maskloss * mask_loss
                             )
 
-                            total_corr, total_ret = 0.0, 0.0
-                            n_layers = 0
-                            for m in self.student.module.mask_modules:
-                                if isinstance(m, SoftMaskedConv2d):
-                                    corr, ret = compute_filter_correlation(
-                                        m.weight, m.mask_weight,
-                                        self.student.module.gumbel_temperature)
-                                    total_corr += corr.item()
-                                    total_ret += float(ret)
-                                    n_layers += 1
-                            avg_corr = total_corr / n_layers if n_layers > 0 else 0.0
-                            avg_ret = total_ret / n_layers if n_layers > 0 else 0.0
+                            
 
                         scaler.scale(total_loss).backward()
                         scaler.step(self.optim_weight)
@@ -502,7 +491,7 @@ class TrainDDP:
                     reduced_total_loss = self.reduce_tensor(total_loss.detach())
                     reduced_prec1 = self.reduce_tensor(torch.tensor(prec1, device='cuda'))
                     reduced_avg_corr = self.reduce_tensor(torch.tensor(avg_corr, device='cuda'))
-                    reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
+                    #reduced_avg_ret = self.reduce_tensor(torch.tensor(avg_ret, device='cuda'))
 
                     if self.rank == 0:
                         n = batch_size if is_video_dataset else images.size(0)
@@ -512,7 +501,7 @@ class TrainDDP:
                         meter_maskloss.update(self.coef_maskloss * reduced_mask_loss.item(), n)
                         meter_loss.update(reduced_total_loss.item(), n)
                         meter_top1.update(reduced_prec1.item(), n)
-                        meter_avg_corr.update(reduced_avg_corr.item(), n)
+                        #meter_avg_corr.update(reduced_avg_corr.item(), n)
 
 
                         _tqdm.set_postfix(
