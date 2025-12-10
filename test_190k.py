@@ -376,17 +376,12 @@ class Test:
 
 # <--- بخش پیکربندی و اجرای اصلی --->
 class Config:
-    """
-    کلاسی برای نگهداری تمام پارامترهای پیکربندی.
-    به راحتی مقادیر زیر را تغییر دهید.
-    """
+  
     def __init__(self):
         # --- پارامترهای اصلی ---
         self.seed = 42  # برای تکرارپذیری نتایج
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.arch = "ResNet_50" # معماری مدل
-        
-        # --- پارامترهای دیتاست ---
+        self.arch = "ResNet_50" 
         self.dataset_mode = "190k" # گزینه‌ها: hardfake, rvf10k, 140k, 200k, 190k, 330k
         self.dataset_dir = "/path/to/your/dataset" # << مسیر دیتاست اصلی خود را اینجا قرار دهید
         self.new_dataset_dir = None # یا مسیر یک دیتاست تست جدید را قرار دهید
